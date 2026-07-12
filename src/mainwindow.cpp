@@ -450,7 +450,10 @@ void MainWindow::onTextureChanged(int index) {
 }
 
 void MainWindow::triggerAutoPreview() {
-    if(m_previewWatcher->isRunning()||m_exportWatcher->isRunning()) return;
+    if(m_previewWatcher->isRunning()||m_exportWatcher->isRunning()) {
+        m_previewPending = true;  // 标记需要重新预览，当前渲染完成后再触发
+        return;
+    }
     TemplateParams params=getParamsFromForm();
     QString text=getTextFromTextEdit();
     m_exportRate=params.rate;
@@ -547,7 +550,7 @@ std::vector<QImage> MainWindow::generatePreviewAsync(TemplateParams params, QStr
 
 void MainWindow::onPreviewFinished() {
     if(m_progressDialog)m_progressDialog->close();
-    if(m_previewWatcher->isCanceled())return;
+    if(m_previewWatcher->isCanceled()){ checkPendingPreview(); return; }
     m_previewImages=m_previewWatcher->result();
     m_totalPages=static_cast<int>(m_previewImages.size());m_currentPage=0;
     updatePaginationUI();
@@ -560,6 +563,14 @@ void MainWindow::onPreviewFinished() {
         QString cl; for(size_t i=0;i<uc.size()&&i<20;++i){cl+=uc[i];if(i<uc.size()-1&&i<19)cl+=" ";}
         if(uc.size()>20)cl+=tr(" ...等共 %1 个").arg(uc.size());
         QMessageBox::warning(this,tr("生僻字提示"),tr("以下 %1 个字符不存在:\n\n%2").arg(uc.size()).arg(cl));
+    }
+    checkPendingPreview();
+}
+
+void MainWindow::checkPendingPreview() {
+    if (m_previewPending) {
+        m_previewPending = false;
+        m_autoPreviewTimer->start();  // 短暂延迟后触发新预览
     }
 }
 

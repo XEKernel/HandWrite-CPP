@@ -132,6 +132,7 @@ private slots:
     // 自动预览
     void onParameterChanged();
     void onTextureChanged(int index);
+    void checkPendingPreview();
     void triggerAutoPreview();
 
 private:
@@ -159,6 +160,7 @@ private:
     
     // 自动预览
     QTimer *m_autoPreviewTimer;
+    bool m_previewPending = false;  // 有新的预览请求等待当前渲染完成
     
     // 动态创建的控件
     QComboBox *m_comboTexture;
