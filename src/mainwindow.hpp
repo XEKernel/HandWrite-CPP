@@ -10,6 +10,7 @@
 #include <QMessageBox>
 #include <QImage>
 #include <QMouseEvent>
+#include <functional>
 #include <QPixmap>
 #include <QProgressDialog>
 #include <QFutureWatcher>
@@ -76,6 +77,7 @@ private:
     QPointF m_points[4];
     int m_currentPoint = 0;
     int m_dragPoint = -1;
+    std::function<void()> m_pointCompleteCallback;
 };
 
 class MainWindow : public QMainWindow {

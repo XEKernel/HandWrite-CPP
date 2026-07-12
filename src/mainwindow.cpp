@@ -880,7 +880,17 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     }
     
     m_scaledPixmap = QPixmap::fromImage(m_image.scaled(760, 520, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    setFixedSize(m_scaledPixmap.width() + 20, m_scaledPixmap.height() + 60);
+    setFixedSize(m_scaledPixmap.width() + 20, m_scaledPixmap.height() + 85);
+    
+    // OK按钮
+    auto* btnOk = new QPushButton(tr("确定"), this);
+    btnOk->setGeometry((width() - 80) / 2, m_scaledPixmap.height() + 55, 80, 25);
+    btnOk->setEnabled(false);
+    connect(btnOk, &QPushButton::clicked, this, [this](){ if (m_currentPoint >= 4) accept(); });
+    // 当4个点都设好后启用确定按钮
+    auto updateBtn = [this, btnOk]() { btnOk->setEnabled(m_currentPoint >= 4); };
+    // 在mousePressEvent中也会更新
+    m_pointCompleteCallback = [this, btnOk]() { btnOk->setEnabled(m_currentPoint >= 4); };
     
     // 恢复已有校准点
     if (calib.enabled && calib.isValid()) {
@@ -950,7 +960,7 @@ void CalibrationDialog::paintEvent(QPaintEvent*) {
         const char* labels[] = {"左上", "右上", "右下", "左下"};
         p.drawText(5, h + 25, tr("请点击纸张的%1角").arg(labels[m_currentPoint]));
     } else {
-        p.drawText(5, h + 25, tr("锚点已设置 (4/4) - 可拖拽调整，关闭窗口确认"));
+        p.drawText(5, h + 25, tr("锚点已设置 (4/4) - 可拖拽调整，点击确定"));
     }
 }
 
@@ -972,6 +982,7 @@ void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
     if (m_currentPoint < 4) {
         m_points[m_currentPoint] = toImageCoords(pos);
         m_currentPoint++;
+        if (m_currentPoint >= 4 && m_pointCompleteCallback) m_pointCompleteCallback();
         update();
     }
 }

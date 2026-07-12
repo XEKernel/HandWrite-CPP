@@ -779,8 +779,10 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
         auto& cal = data.params.bgCalibration;
         
         // 计算缩放后的锚点坐标
-        qreal sx = static_cast<qreal>(data.scaledWidth) / std::max(bgImage.width(), 1);
-        qreal sy = static_cast<qreal>(data.scaledHeight) / std::max(bgImage.height(), 1);
+        int bw = bgImage.width(); if (bw < 1) bw = 1;
+        int bh = bgImage.height(); if (bh < 1) bh = 1;
+        qreal sx = static_cast<qreal>(data.scaledWidth) / bw;
+        qreal sy = static_cast<qreal>(data.scaledHeight) / bh;
         
         QPolygonF targetQuad;
         targetQuad << QPointF(cal.topLeft.x() * sx, cal.topLeft.y() * sy)
@@ -795,8 +797,9 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
                    << QPointF(0, data.scaledHeight);
         
         QTransform warp;
-        QTransform::quadToQuad(sourceQuad, targetQuad, warp);
-        if (!warp.isIdentity()) {
+        bool ok = QTransform::quadToQuad(sourceQuad, targetQuad, warp);
+        
+        if (ok && !warp.isIdentity()) {
             finalPainter.setTransform(warp);
             finalPainter.setRenderHint(QPainter::SmoothPixmapTransform);
             finalPainter.drawImage(0, 0, textOverlay);
