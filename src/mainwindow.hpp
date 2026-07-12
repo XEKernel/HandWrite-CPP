@@ -4,6 +4,8 @@
 #include <QMainWindow>
 #include <QSplitter>
 #include <QDialog>
+#include <QAction>
+#include <QMenuBar>
 #include <QGraphicsScene>
 #include <QGraphicsPixmapItem>
 #include <QFileDialog>
@@ -103,6 +105,7 @@ private slots:
     void onPushButtonSelectBgImageClicked();
     void onPushButtonClearBgImageClicked();
     void onPushButtonCalibrateBgClicked();
+    void showAboutDialog();
     
     // 预设
     void onPushButtonPresetSaveClicked();

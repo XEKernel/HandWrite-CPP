@@ -115,6 +115,12 @@ MainWindow::MainWindow(QWidget *parent)
       m_pixmapItem(nullptr), m_previewWatcher(new QFutureWatcher<std::vector<QImage>>(this)),
       m_exportWatcher(new QFutureWatcher<std::map<int,std::string>>(this)), m_progressDialog(nullptr) {
     ui->setupUi(this);
+    
+    // 菜单栏
+    auto* helpMenu = menuBar()->addMenu(tr("帮助"));
+    auto* aboutAction = helpMenu->addAction(tr("关于"));
+    connect(aboutAction, &QAction::triggered, this, &MainWindow::showAboutDialog);
+    
     ui->imgPreview->setScene(m_scene);
     ui->imgPreview->setDragMode(QGraphicsView::ScrollHandDrag);
     ui->imgPreview->setRenderHint(QPainter::Antialiasing);
@@ -1060,6 +1066,23 @@ void MainWindow::setupProgressDialog(const QString& title, int maximum) {
     m_progressDialog->setWindowModality(Qt::WindowModal);
     m_progressDialog->setCancelButton(nullptr);
     m_progressDialog->setMinimumDuration(0); m_progressDialog->setValue(0); m_progressDialog->show();
+}
+
+void MainWindow::showAboutDialog() {
+    QMessageBox about(this);
+    about.setWindowTitle(tr("关于 HandWrite Generator"));
+    about.setIconPixmap(QPixmap(":/resources/app.ico").scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    about.setTextFormat(Qt::RichText);
+    about.setText(QString(
+        "<h3>HandWrite Generator v2.0</h3>"
+        "<p>手写作业生成器 — 将电子文本渲染为模拟手写效果</p>"
+        "<p>作者: <b>XEKernel</b></p>"
+        "<p>代码仓库: <a href='https://github.com/XEKernel/HandWrite-CPP'>github.com/XEKernel/HandWrite-CPP</a></p>"
+        "<hr>"
+        "<p style='color: gray;'>构建: Qt %1 &middot; GCC %2 &middot; MSYS2 ucrt64</p>"
+    ).arg(QT_VERSION_STR).arg(__VERSION__));
+    about.setStandardButtons(QMessageBox::Ok);
+    about.exec();
 }
 
 } // namespace HandWrite
