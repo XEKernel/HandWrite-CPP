@@ -2,6 +2,7 @@
 #define MAINWINDOW_HPP
 
 #include <QMainWindow>
+#include <QSplitter>
 #include <QGraphicsScene>
 #include <QGraphicsPixmapItem>
 #include <QFileDialog>

@@ -134,6 +134,27 @@ MainWindow::MainWindow(QWidget *parent)
     populateComboBoxes();
     setupDynamicUi();
     
+    // QSplitter: 左侧预览区与右侧设置栏可拖拽调节
+    {
+        auto* mainLayout = ui->horizontalLayout_main;
+        auto* displayLayout = mainLayout->takeAt(0)->layout();
+        auto* scrollItem = mainLayout->takeAt(0);
+        auto* scrollWidget = scrollItem->widget();
+        delete scrollItem;
+        
+        auto* leftContainer = new QWidget(this);
+        leftContainer->setLayout(displayLayout);
+        
+        auto* splitter = new QSplitter(Qt::Horizontal, this);
+        splitter->setHandleWidth(5);
+        splitter->setChildrenCollapsible(false);
+        splitter->addWidget(leftContainer);
+        splitter->addWidget(scrollWidget);
+        splitter->setSizes({750, 320});
+        
+        mainLayout->addWidget(splitter);
+    }
+    
     connect(m_previewWatcher, &QFutureWatcher<std::vector<QImage>>::finished, this, &MainWindow::onPreviewFinished);
     connect(m_exportWatcher, &QFutureWatcher<std::map<int,std::string>>::finished, this, &MainWindow::onExportFinished);
     connect(m_exportWatcher, &QFutureWatcher<std::map<int,std::string>>::finished, this, &MainWindow::onExportFinished);
