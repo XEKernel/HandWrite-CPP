@@ -27,7 +27,8 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-qt6-base
             mingw-w64-ucrt-x86_64-fontconfig
-            mingw-w64-ucrt-x86_64-zip
+            zip
+            unzip
 
       - name: Configure
         run: |
@@ -47,16 +48,16 @@ jobs:
       - name: Copy runtime DLLs
         run: |
           cd build
-          cp /ucrt64/bin/*.dll . 2>/dev/null
-          cp -r ttf_library . 2>/dev/null || echo "ttf_library not in source"
+          cp /ucrt64/bin/*.dll . 2>/dev/null || true
           echo "[Paths]" > qt.conf
           echo "Prefix = ." >> qt.conf
           echo "Plugins = plugins" >> qt.conf
 
       - name: Package release
+        shell: pwsh
         run: |
           cd build
-          zip -r ../HandWrite-v2.0-windows-x64.zip HandWrite.exe handwrite-cli.exe qt.conf LICENSE* README* 2>/dev/null || true
+          Compress-Archive -Path HandWrite.exe,handwrite-cli.exe,qt.conf,*.dll,platforms,imageformats,styles,tls -CompressionLevel Optimal -DestinationPath ../HandWrite-v2.0-windows-x64.zip -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -79,7 +80,7 @@ jobs:
           path: HandWrite-v2.0-windows-x64.zip
 
       - name: Create Release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         uses: softprops/action-gh-release@v2
         with:
           name: HandWrite v2.0
