@@ -684,28 +684,51 @@ void HandwriteGenerator::drawTextWithPerturbationStatic(QPainter& painter, const
 
 QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     QImage image(data.scaledWidth, data.scaledHeight, QImage::Format_ARGB32);
-    
-    // 背景色
     image.fill(QColor(data.params.backgroundColor.r, data.params.backgroundColor.g,
                       data.params.backgroundColor.b, data.params.backgroundColor.a));
     
-    QPainter painter(&image);
+    bool useCalibration = data.params.bgCalibration.isValid();
+    
+    // 决定在哪个画布上绘制文字
+    QImage* textCanvas = &image;  // 默认直接画在主图上
+    QImage textOverlay;           // 校准模式下单独的文字画布
+    QPoint textOffset(0, 0);
+    
+    if (useCalibration) {
+        // 文字先画到独立的透明画布，再透视变换到主图
+        textOverlay = QImage(data.scaledWidth, data.scaledHeight, QImage::Format_ARGB32);
+        textOverlay.fill(Qt::transparent);
+        textCanvas = &textOverlay;
+    }
+    
+    QPainter painter(textCanvas);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::TextAntialiasing);
     
-    // 背景图片（如果设置）
+    // 背景图片（画在主图上或文字画布上）
+    QImage bgImage;
     if (!data.params.backgroundImagePath.empty()) {
-        QImage bg(QString::fromStdString(data.params.backgroundImagePath));
-        if (!bg.isNull()) {
-            painter.drawImage(image.rect(), bg.scaled(data.scaledWidth, data.scaledHeight,
-                               Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        bgImage = QImage(QString::fromStdString(data.params.backgroundImagePath));
+        if (!bgImage.isNull()) {
+            if (useCalibration) {
+                // 校准模式：背景画到主图
+                QPainter bgPainter(&image);
+                bgPainter.drawImage(image.rect(), bgImage.scaled(data.scaledWidth, data.scaledHeight,
+                                     Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+                bgPainter.end();
+            } else {
+                painter.drawImage(image.rect(), bgImage.scaled(data.scaledWidth, data.scaledHeight,
+                                   Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+            }
         }
     }
     
-    // 纸张纹理
-    drawPaperTexture(painter, data.scaledWidth, data.scaledHeight,
-                     data.params.paperTexture, data.params.rate,
-                     data.params.textureOpacity);
+    // 纸张纹理（校准模式下跳过，因为纹理线无法透视变换）
+    if (!useCalibration) {
+        drawPaperTexture(painter, data.scaledWidth, data.scaledHeight,
+                         data.params.paperTexture, data.params.rate,
+                         data.params.textureOpacity);
+    }
     
     // 字体颜色
     QColor fillColor(data.params.fillColor.r, data.params.fillColor.g,
@@ -749,6 +772,37 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     }
     
     painter.end();
+    
+    // 透视变换：将文字画布映射到背景图片的校准区域
+    if (useCalibration) {
+        QPainter finalPainter(&image);
+        auto& cal = data.params.bgCalibration;
+        
+        // 计算缩放后的锚点坐标
+        qreal sx = static_cast<qreal>(data.scaledWidth) / std::max(bgImage.width(), 1);
+        qreal sy = static_cast<qreal>(data.scaledHeight) / std::max(bgImage.height(), 1);
+        
+        QPolygonF targetQuad;
+        targetQuad << QPointF(cal.topLeft.x() * sx, cal.topLeft.y() * sy)
+                   << QPointF(cal.topRight.x() * sx, cal.topRight.y() * sy)
+                   << QPointF(cal.bottomRight.x() * sx, cal.bottomRight.y() * sy)
+                   << QPointF(cal.bottomLeft.x() * sx, cal.bottomLeft.y() * sy);
+        
+        QPolygonF sourceQuad;
+        sourceQuad << QPointF(0, 0)
+                   << QPointF(data.scaledWidth, 0)
+                   << QPointF(data.scaledWidth, data.scaledHeight)
+                   << QPointF(0, data.scaledHeight);
+        
+        QTransform warp;
+        QTransform::quadToQuad(sourceQuad, targetQuad, warp);
+        if (!warp.isIdentity()) {
+            finalPainter.setTransform(warp);
+            finalPainter.setRenderHint(QPainter::SmoothPixmapTransform);
+            finalPainter.drawImage(0, 0, textOverlay);
+        }
+        finalPainter.end();
+    }
     
     // 墨水洇染（后处理）
     if (data.params.inkBleed && data.params.inkBleedRadius > 0) {

@@ -13,6 +13,7 @@
 #include <QFont>
 #include <QFile>
 #include <QPen>
+#include <QPointF>
 #include <optional>
 
 namespace HandWrite {
@@ -74,6 +75,19 @@ struct StyledSpan {
 //=============================================================================
 // 模板参数（大幅扩展）
 //=============================================================================
+//=============================================================================
+// 背景图片校准锚点
+//=============================================================================
+struct BackgroundCalibration {
+    bool enabled = false;
+    QPointF topLeft, topRight, bottomRight, bottomLeft;
+    
+    bool isValid() const {
+        return enabled && topLeft != topRight && topRight != bottomRight 
+            && bottomRight != bottomLeft && bottomLeft != topLeft;
+    }
+};
+
 struct TemplateParams {
     // --- 纸张 ---
     int rate = 4;
@@ -82,6 +96,7 @@ struct TemplateParams {
     PaperTexture paperTexture = PaperTexture::None;
     double textureOpacity = 0.3;          // 纹理透明度
     std::string backgroundImagePath;      // 背景图片路径（空=不使用）
+    BackgroundCalibration bgCalibration;   // 背景图片锚点校准
 
     // --- 字体 ---
     std::string fontPath;

@@ -3,11 +3,13 @@
 
 #include <QMainWindow>
 #include <QSplitter>
+#include <QDialog>
 #include <QGraphicsScene>
 #include <QGraphicsPixmapItem>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QImage>
+#include <QMouseEvent>
 #include <QPixmap>
 #include <QProgressDialog>
 #include <QFutureWatcher>
@@ -54,6 +56,28 @@ private:
     QCheckBox *m_colorCheck; QSpinBox *m_colorR, *m_colorG, *m_colorB, *m_colorA;
 };
 
+//=============================================================================
+// 背景图片锚点校准对话框
+//=============================================================================
+class CalibrationDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent = nullptr);
+    BackgroundCalibration getCalibration() const;
+private:
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    QPointF toImageCoords(const QPoint& widgetPos) const;
+    QPoint toWidgetCoords(const QPointF& imgPos) const;
+    QImage m_image;
+    QPixmap m_scaledPixmap;
+    QRectF m_imageRect;
+    QPointF m_points[4];
+    int m_currentPoint = 0;
+    int m_dragPoint = -1;
+};
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -76,6 +100,7 @@ private slots:
     void onPushButtonClearOverridesClicked();
     void onPushButtonSelectBgImageClicked();
     void onPushButtonClearBgImageClicked();
+    void onPushButtonCalibrateBgClicked();
     
     // 预设
     void onPushButtonPresetSaveClicked();
@@ -137,6 +162,7 @@ private:
     QDoubleSpinBox *m_spinStrikeThroughRate;
     QDoubleSpinBox *m_spinStrokeWidthSigma;
     QLabel *m_labelBgImage;
+    BackgroundCalibration m_bgCalibration;
     QString m_bgImagePath;
     
     QListWidget *m_presetList;

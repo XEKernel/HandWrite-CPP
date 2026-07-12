@@ -216,10 +216,14 @@ void MainWindow::setupDynamicUi() {
     connect(btnSelectBg, &QPushButton::clicked, this, &MainWindow::onPushButtonSelectBgImageClicked);
     auto *btnClearBg = new QPushButton(tr("清除"), bgGroup);
     connect(btnClearBg, &QPushButton::clicked, this, &MainWindow::onPushButtonClearBgImageClicked);
+    auto *btnCalibrateBg = new QPushButton(tr("锚点"), bgGroup);
+    btnCalibrateBg->setToolTip(tr("设置文字在背景图片上的显示区域"));
+    connect(btnCalibrateBg, &QPushButton::clicked, this, &MainWindow::onPushButtonCalibrateBgClicked);
     m_labelBgImage = new QLabel(tr("未设置"), bgGroup);
     m_labelBgImage->setWordWrap(true);
     bgLayout->addWidget(btnSelectBg);
     bgLayout->addWidget(btnClearBg);
+    bgLayout->addWidget(btnCalibrateBg);
     bgLayout->addWidget(m_labelBgImage, 1);
     
     // 排版设置
@@ -487,6 +491,7 @@ TemplateParams MainWindow::getParamsFromForm() {
     else if(ti==5)p.paperTexture=PaperTexture::DotGrid;
     p.textureOpacity=m_spinTextureOpacity->value();
     p.backgroundImagePath=m_bgImagePath.toStdString();
+    p.bgCalibration=m_bgCalibration;
     p.paragraphIndent=m_checkParagraphIndent->isChecked();
     p.paragraphSpacing=m_spinParagraphSpacing->value();
     p.inkBleed=m_checkInkBleed->isChecked();
@@ -642,7 +647,20 @@ void MainWindow::onPushButtonSelectBgImageClicked() {
 void MainWindow::onPushButtonClearBgImageClicked() {
     m_bgImagePath.clear();
     m_labelBgImage->setText(tr("未设置"));
+    m_bgCalibration = BackgroundCalibration{};
     onParameterChanged();
+}
+
+void MainWindow::onPushButtonCalibrateBgClicked() {
+    if (m_bgImagePath.isEmpty()) {
+        QMessageBox::warning(this, tr("提示"), tr("请先选择背景图片"));
+        return;
+    }
+    CalibrationDialog dlg(m_bgImagePath, m_bgCalibration, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        m_bgCalibration = dlg.getCalibration();
+        onParameterChanged();
+    }
 }
 
 //=============================================================================
@@ -843,6 +861,126 @@ void MainWindow::onComboBoxPaperTemplateCurrentIndexChanged(int) {
     bool ic=(ui->comboBoxPaperTemplate->currentText()=="自定义");
     ui->lineEditWidth->setReadOnly(!ic); ui->lineEditHeight->setReadOnly(!ic);
     onParameterChanged();
+}
+
+//=============================================================================
+// CalibrationDialog 实现
+//=============================================================================
+
+CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent)
+    : QDialog(parent) {
+    setWindowTitle(tr("设置锚点 - 依次点击纸的左上、右上、右下、左下"));
+    resize(800, 600);
+    
+    m_image = QImage(imagePath);
+    if (m_image.isNull()) {
+        QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片"));
+        reject();
+        return;
+    }
+    
+    m_scaledPixmap = QPixmap::fromImage(m_image.scaled(760, 520, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    setFixedSize(m_scaledPixmap.width() + 20, m_scaledPixmap.height() + 60);
+    
+    // 恢复已有校准点
+    if (calib.enabled && calib.isValid()) {
+        m_points[0] = calib.topLeft;
+        m_points[1] = calib.topRight;
+        m_points[2] = calib.bottomRight;
+        m_points[3] = calib.bottomLeft;
+        m_currentPoint = 4;
+    }
+    
+    setMouseTracking(true);
+}
+
+BackgroundCalibration CalibrationDialog::getCalibration() const {
+    BackgroundCalibration c;
+    c.enabled = (m_currentPoint >= 4);
+    c.topLeft = m_points[0];
+    c.topRight = m_points[1];
+    c.bottomRight = m_points[2];
+    c.bottomLeft = m_points[3];
+    return c;
+}
+
+QPointF CalibrationDialog::toImageCoords(const QPoint& widgetPos) const {
+    qreal rx = static_cast<qreal>(m_image.width()) / m_scaledPixmap.width();
+    qreal ry = static_cast<qreal>(m_image.height()) / m_scaledPixmap.height();
+    return QPointF(widgetPos.x() * rx, widgetPos.y() * ry);
+}
+
+QPoint CalibrationDialog::toWidgetCoords(const QPointF& imgPos) const {
+    qreal rx = static_cast<qreal>(m_scaledPixmap.width()) / m_image.width();
+    qreal ry = static_cast<qreal>(m_scaledPixmap.height()) / m_image.height();
+    return QPoint(static_cast<int>(imgPos.x() * rx), static_cast<int>(imgPos.y() * ry));
+}
+
+void CalibrationDialog::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.fillRect(rect(), QColor(40, 40, 40));
+    p.drawPixmap(0, 0, m_scaledPixmap);
+    
+    // 绘制已设置的锚点和连线
+    QPen linePen(Qt::red, 2);
+    QPen pointPen(Qt::red);
+    p.setPen(Qt::NoPen);
+    
+    for (int i = 0; i < m_currentPoint; ++i) {
+        QPoint wp = toWidgetCoords(m_points[i]);
+        p.setBrush(Qt::red);
+        p.drawEllipse(wp, 6, 6);
+        p.setBrush(Qt::white);
+        p.drawEllipse(wp, 3, 3);
+    }
+    
+    p.setPen(linePen);
+    for (int i = 0; i < m_currentPoint - 1; ++i) {
+        p.drawLine(toWidgetCoords(m_points[i]), toWidgetCoords(m_points[i + 1]));
+    }
+    if (m_currentPoint >= 4) {
+        p.drawLine(toWidgetCoords(m_points[3]), toWidgetCoords(m_points[0]));
+    }
+    
+    // 提示文字
+    p.setPen(Qt::white);
+    p.setFont(QFont("Microsoft YaHei", 10));
+    int h = m_scaledPixmap.height();
+    if (m_currentPoint < 4) {
+        const char* labels[] = {"左上", "右上", "右下", "左下"};
+        p.drawText(5, h + 25, tr("请点击纸张的%1角").arg(labels[m_currentPoint]));
+    } else {
+        p.drawText(5, h + 25, tr("锚点已设置 (4/4) - 可拖拽调整，关闭窗口确认"));
+    }
+}
+
+void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
+    if (ev->button() != Qt::LeftButton) return;
+    QPoint pos = ev->pos();
+    
+    // 检查是否点击了已有的点（拖拽）
+    m_dragPoint = -1;
+    for (int i = 0; i < m_currentPoint; ++i) {
+        QPoint wp = toWidgetCoords(m_points[i]);
+        if ((pos - wp).manhattanLength() < 12) {
+            m_dragPoint = i;
+            return;
+        }
+    }
+    
+    // 设置新锚点
+    if (m_currentPoint < 4) {
+        m_points[m_currentPoint] = toImageCoords(pos);
+        m_currentPoint++;
+        update();
+    }
+}
+
+void CalibrationDialog::mouseMoveEvent(QMouseEvent* ev) {
+    if (m_dragPoint >= 0) {
+        m_points[m_dragPoint] = toImageCoords(ev->pos());
+        update();
+    }
 }
 
 //=============================================================================
