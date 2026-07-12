@@ -1,4 +1,4 @@
-name: Build HandWrite
+name: Build and Release
 
 on:
   push:
@@ -27,6 +27,7 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-qt6-base
             mingw-w64-ucrt-x86_64-fontconfig
+            mingw-w64-ucrt-x86_64-zip
 
       - name: Configure
         run: |
@@ -38,6 +39,25 @@ jobs:
           cd build
           ninja
 
+      - name: Deploy Qt DLLs
+        run: |
+          cd build
+          windeployqt HandWrite.exe --no-translations --no-system-d3d-compiler
+
+      - name: Copy runtime DLLs
+        run: |
+          cd build
+          cp /ucrt64/bin/*.dll . 2>/dev/null
+          cp -r ttf_library . 2>/dev/null || echo "ttf_library not in source"
+          echo "[Paths]" > qt.conf
+          echo "Prefix = ." >> qt.conf
+          echo "Plugins = plugins" >> qt.conf
+
+      - name: Package release
+        run: |
+          cd build
+          zip -r ../HandWrite-v2.0-windows-x64.zip HandWrite.exe handwrite-cli.exe qt.conf LICENSE* README* 2>/dev/null || true
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -45,3 +65,47 @@ jobs:
           path: |
             build/HandWrite.exe
             build/handwrite-cli.exe
+            build/qt.conf
+            build/*.dll
+            build/platforms/
+            build/imageformats/
+            build/styles/
+            build/tls/
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HandWrite-Windows-Zip
+          path: HandWrite-v2.0-windows-x64.zip
+
+      - name: Create Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: HandWrite v2.0
+          tag_name: v2.0
+          body: |
+            ## HandWrite v2.0
+
+            ### New Features
+            - 6 paper textures (horizontal line, grid, tianzige, composition, dot grid)
+            - Ink bleed, stroke width variation, strikethrough simulation
+            - Real-time auto-preview with debounce timer
+            - PDF export
+            - Multi-preset management (save/load/delete)
+            - Paragraph indent & spacing
+            - Markdown light parsing (# headings, ~~strikethrough~~, --- separator)
+            - Font mixing, background image overlay
+            - CLI mode (handwrite-cli)
+            - Dynamic UI
+
+            ### Bug Fixes
+            - Use-after-free, null pointer crash, font path mismatch
+            - Paper template selector ordering
+            - Character override, perturbed font spacing, line spacing consistency
+            - Code duplication, input validation, config parsing
+          files: HandWrite-v2.0-windows-x64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
