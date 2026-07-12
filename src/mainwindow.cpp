@@ -199,7 +199,7 @@ void MainWindow::setupDynamicUi() {
     auto *textureLayout = new QHBoxLayout(textureGroup);
     m_comboTexture = new QComboBox(textureGroup);
     for(const auto& t : m_tools.paperTextures()) m_comboTexture->addItem(QString::fromStdString(t.displayName));
-    connect(m_comboTexture, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onParameterChanged);
+    connect(m_comboTexture, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onTextureChanged);
     textureLayout->addWidget(new QLabel(tr("类型:"), textureGroup));
     textureLayout->addWidget(m_comboTexture);
     m_spinTextureOpacity = new QDoubleSpinBox(textureGroup);
@@ -398,6 +398,31 @@ void MainWindow::populateComboBoxes() {
 
 void MainWindow::onParameterChanged() { 
     if (m_autoPreviewTimer) m_autoPreviewTimer->start(); 
+}
+
+void MainWindow::onTextureChanged(int index) {
+    if (index < 0) return;
+    
+    // 纹理网格尺寸 (rate=1 时的像素)
+    int cellSize = 25;  // 默认: 横线纸/方格纸/田字格/点阵纸
+    if (index == 4) cellSize = 28;  // 作文纸
+    
+    if (index > 0) {  // 有纹理
+        int fs = ui->lineEditFontSize->text().toInt();
+        if (fs <= 0) fs = 30;
+        
+        // 行间距 = cellSize 的整数倍, 至少容纳字符
+        int newSpacing = cellSize * static_cast<int>(std::ceil(fs * 1.2 / cellSize));
+        if (newSpacing < cellSize) newSpacing = cellSize;
+        
+        ui->lineEditLineSpacing->setText(QString::number(newSpacing));
+        
+        // 上边距: 对齐到第一条纹理线
+        int newMargin = 0;
+        ui->lineEditMarginTop->setText(QString::number(newMargin));
+    }
+    
+    onParameterChanged();
 }
 
 void MainWindow::triggerAutoPreview() {

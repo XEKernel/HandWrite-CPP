@@ -459,6 +459,18 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
     int globalCharIndex = 0;
     int paraIndex = 0;
     
+    // 纹理网格对齐: 计算网格尺寸
+    int textureGridSize = 25;  // 默认横线纸/方格纸/田字格/点阵纸
+    if (m_params.paperTexture == PaperTexture::Composition) textureGridSize = 28;
+    int scaledGrid = textureGridSize * m_params.rate;
+    bool alignToGrid = (m_params.paperTexture != PaperTexture::None);
+    
+    if (alignToGrid) {
+        // 首行对齐到最近网格线，至少到第一个实用网格线
+        qreal snapped = std::round(y / scaledGrid) * scaledGrid;
+        y = std::max(snapped, static_cast<qreal>(scaledGrid));
+    }
+    
     std::random_device rd;
     std::mt19937 seedRng(rd());
     
@@ -484,6 +496,12 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
             int perturbedLineSpacing = lineHeight + 
                 gaussianRandomInt(m_params.lineSpacingSigma * m_params.rate);
             qreal nextY = y + perturbedLineSpacing + extraSpacing;
+            
+            // 对齐到纹理网格线
+            if (alignToGrid) {
+                nextY = std::round(nextY / scaledGrid) * scaledGrid;
+                if (nextY < scaledGrid) nextY = scaledGrid;
+            }
             
             if (nextY + fm.descent() > scaledHeight - scaledBottomMargin) {
                 PageRenderData pageData;

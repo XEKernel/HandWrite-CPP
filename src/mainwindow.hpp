@@ -98,6 +98,7 @@ private slots:
     
     // 自动预览
     void onParameterChanged();
+    void onTextureChanged(int index);
     void triggerAutoPreview();
 
 private:
