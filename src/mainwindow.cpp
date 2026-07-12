@@ -117,9 +117,23 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
     
     // 菜单栏
-    auto* helpMenu = menuBar()->addMenu(tr("帮助"));
-    auto* aboutAction = helpMenu->addAction(tr("关于"));
-    connect(aboutAction, &QAction::triggered, this, &MainWindow::showAboutDialog);
+    auto* fileMenu = menuBar()->addMenu(tr("文件(&F)"));
+    auto* actNew = fileMenu->addAction(tr("新建(&N)"), this, &MainWindow::onMenuFileNew);
+    actNew->setShortcut(QKeySequence::New);
+    fileMenu->addAction(tr("打开文本(&O)..."), this, &MainWindow::onMenuFileOpen, QKeySequence::Open);
+    fileMenu->addAction(tr("保存文本(&S)"), this, &MainWindow::onMenuFileSave, QKeySequence::Save);
+    fileMenu->addSeparator();
+    fileMenu->addAction(tr("退出(&X)"), this, &MainWindow::close, QKeySequence::Quit);
+    
+    auto* presetMenu = menuBar()->addMenu(tr("预设(&P)"));
+    presetMenu->addAction(tr("保存预设..."), this, &MainWindow::onPushButtonSaveConfigClicked, QKeySequence("Ctrl+Shift+S"));
+    presetMenu->addAction(tr("加载预设..."), this, &MainWindow::onPushButtonLoadConfigClicked, QKeySequence("Ctrl+Shift+O"));
+    presetMenu->addSeparator();
+    presetMenu->addAction(tr("导出 PNG..."), this, &MainWindow::onPushButtonExportClicked, QKeySequence("Ctrl+E"));
+    presetMenu->addAction(tr("导出 PDF..."), this, &MainWindow::onPushButtonExportPdfClicked, QKeySequence("Ctrl+P"));
+    
+    auto* helpMenu = menuBar()->addMenu(tr("帮助(&H)"));
+    helpMenu->addAction(tr("关于(&A)"), this, &MainWindow::showAboutDialog);
     
     ui->imgPreview->setScene(m_scene);
     ui->imgPreview->setDragMode(QGraphicsView::ScrollHandDrag);
@@ -1066,6 +1080,36 @@ void MainWindow::setupProgressDialog(const QString& title, int maximum) {
     m_progressDialog->setWindowModality(Qt::WindowModal);
     m_progressDialog->setCancelButton(nullptr);
     m_progressDialog->setMinimumDuration(0); m_progressDialog->setValue(0); m_progressDialog->show();
+}
+
+//=============================================================================
+// 菜单操作
+//=============================================================================
+
+void MainWindow::onMenuFileNew() {
+    ui->textEditMain->clear();
+    onParameterChanged();
+}
+
+void MainWindow::onMenuFileOpen() {
+    QString path = QFileDialog::getOpenFileName(this, tr("打开文本文件"), "",
+        tr("文本文件 (*.txt *.md);;所有文件 (*)"));
+    if (path.isEmpty()) return;
+    QFile f(path);
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        ui->textEditMain->setPlainText(QString::fromUtf8(f.readAll()));
+        onParameterChanged();
+    }
+}
+
+void MainWindow::onMenuFileSave() {
+    QString path = QFileDialog::getSaveFileName(this, tr("保存文本"), "text.txt",
+        tr("文本文件 (*.txt);;Markdown (*.md);;所有文件 (*)"));
+    if (path.isEmpty()) return;
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        f.write(ui->textEditMain->toPlainText().toUtf8());
+    }
 }
 
 void MainWindow::showAboutDialog() {

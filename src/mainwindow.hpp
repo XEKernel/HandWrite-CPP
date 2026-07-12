@@ -106,6 +106,9 @@ private slots:
     void onPushButtonClearBgImageClicked();
     void onPushButtonCalibrateBgClicked();
     void showAboutDialog();
+    void onMenuFileNew();
+    void onMenuFileOpen();
+    void onMenuFileSave();
     
     // 预设
     void onPushButtonPresetSaveClicked();
