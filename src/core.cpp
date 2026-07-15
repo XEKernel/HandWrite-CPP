@@ -694,10 +694,9 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     
     // 决定在哪个画布上绘制文字
     QImage* textCanvas = &image;  // 默认直接画在主图上
-    QImage textOverlay;           // 校准/竖排模式下单独的文字画布
-    bool needTextOverlay = useCalibration || (data.params.textDirection == TextDirection::Vertical);
+    QImage textOverlay;           // 校准模式下单独的文字画布
     
-    if (needTextOverlay) {
+    if (useCalibration) {
         textOverlay = QImage(data.scaledWidth, data.scaledHeight, QImage::Format_ARGB32);
         textOverlay.fill(Qt::transparent);
         textCanvas = &textOverlay;
@@ -781,29 +780,6 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     
     painter.end();
     
-    // 竖排模式：将文字画布旋转 90°
-    if (data.params.textDirection == TextDirection::Vertical) {
-        QTransform rot;
-        rot.rotate(90);
-        textOverlay = textOverlay.transformed(rot, Qt::SmoothTransformation);
-        // 缩放到页面尺寸
-        QImage basis(data.scaledWidth, data.scaledHeight, QImage::Format_ARGB32);
-        basis.fill(Qt::transparent);
-        QPainter rp(&basis);
-        rp.drawImage(basis.rect(), textOverlay.scaled(data.scaledWidth, data.scaledHeight,
-                     Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-        rp.end();
-        textOverlay = basis;
-        
-        if (!useCalibration) {
-            // 非校准竖排：画文字到主图
-            QPainter finalPainter(&image);
-            finalPainter.drawImage(0, 0, textOverlay);
-            finalPainter.end();
-            // 后续步骤跳过
-        }
-    }
-    
     // 网格形变：将文字画布映射到背景图片的校准区域
     if (useCalibration) {
         auto& cal = data.params.bgCalibration;
@@ -864,6 +840,12 @@ static QFont loadFont(const std::string& fontPath, int pixelSize) {
 std::vector<QImage> HandwriteGenerator::generatePreview(const std::string& text) {
     int scaledWidth = m_params.paperWidth * m_params.rate;
     int scaledHeight = m_params.paperHeight * m_params.rate;
+    
+    // 竖排：交换宽高，文本横向填充后再旋转
+    if (m_params.textDirection == TextDirection::Vertical) {
+        std::swap(scaledWidth, scaledHeight);
+    }
+    
     int contentWidth = scaledWidth - (m_params.leftMargin + m_params.rightMargin) * m_params.rate;
     
     QFont font = loadFont(m_params.fontPath, m_params.fontSize * m_params.rate);
@@ -872,6 +854,20 @@ std::vector<QImage> HandwriteGenerator::generatePreview(const std::string& text)
     std::vector<QImage> images;
     images.reserve(pageDataList.size());
     for (const auto& pd : pageDataList) images.push_back(renderPageStatic(pd));
+    
+    // 竖排：旋转每页
+    if (m_params.textDirection == TextDirection::Vertical) {
+        QTransform rot; rot.rotate(90);
+        for (auto& img : images) {
+            img = img.transformed(rot, Qt::SmoothTransformation);
+            // 裁剪到原始宽高
+            int origW = m_params.paperWidth * m_params.rate;
+            int origH = m_params.paperHeight * m_params.rate;
+            if (img.width() > origW || img.height() > origH) {
+                img = img.copy(QRect(0, 0, origW, origH));
+            }
+        }
+    }
     
     if (images.empty()) {
         QImage empty(scaledWidth, scaledHeight, QImage::Format_ARGB32);
@@ -903,13 +899,32 @@ std::vector<QImage> HandwriteGenerator::generatePreviewParallel(const std::strin
     
     int scaledWidth = m_params.paperWidth * m_params.rate;
     int scaledHeight = m_params.paperHeight * m_params.rate;
+    
+    if (m_params.textDirection == TextDirection::Vertical) {
+        std::swap(scaledWidth, scaledHeight);
+    }
+    
     int contentWidth = scaledWidth - (m_params.leftMargin + m_params.rightMargin) * m_params.rate;
     
     QFont font = loadFont(m_params.fontPath, m_params.fontSize * m_params.rate);
     auto pageDataList = layoutPages(text, font, scaledWidth, scaledHeight, contentWidth);
     
     QThreadPool::globalInstance()->setMaxThreadCount(threadCount);
-    return QtConcurrent::blockingMapped<std::vector<QImage>>(pageDataList, renderPageStatic);
+    auto images = QtConcurrent::blockingMapped<std::vector<QImage>>(pageDataList, renderPageStatic);
+    
+    if (m_params.textDirection == TextDirection::Vertical) {
+        QTransform rot; rot.rotate(90);
+        int origW = m_params.paperWidth * m_params.rate;
+        int origH = m_params.paperHeight * m_params.rate;
+        for (auto& img : images) {
+            img = img.transformed(rot, Qt::SmoothTransformation);
+            if (img.width() > origW || img.height() > origH) {
+                img = img.copy(QRect(0, 0, origW, origH));
+            }
+        }
+    }
+    
+    return images;
 }
 
 std::map<int, std::string> HandwriteGenerator::generateImageParallel(const std::string& text,
