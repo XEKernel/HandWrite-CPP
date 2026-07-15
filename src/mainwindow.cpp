@@ -20,6 +20,7 @@
 #include <QAbstractButton>
 #include <QPrinter>
 #include <QPrintDialog>
+#include <QImageReader>
 #include <QIntValidator>
 #include <QDoubleValidator>
 #include <QGroupBox>
@@ -902,7 +903,15 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     : QDialog(parent), m_rows(3), m_cols(3) {
     setWindowTitle(tr("网格校准 — 拖拽锚点适应纸面弯曲"));
     
-    m_image = QImage(imagePath);
+    // 使用 QImageReader 预检查，防止损坏图片导致的崩溃
+    QImageReader reader(imagePath);
+    reader.setAutoTransform(true);
+    if (!reader.canRead()) {
+        QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片（格式不支持或文件损坏）"));
+        reject();
+        return;
+    }
+    m_image = reader.read();
     if (m_image.isNull()) {
         QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片"));
         reject();

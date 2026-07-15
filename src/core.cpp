@@ -11,6 +11,7 @@
 #include <cmath>
 #include <set>
 #include <sstream>
+#include <QImageReader>
 
 namespace HandWrite {
 
@@ -708,19 +709,29 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     // 背景图片（画在主图上或文字画布上）
     QImage bgImage;
     if (!data.params.backgroundImagePath.empty()) {
-        bgImage = QImage(QString::fromStdString(data.params.backgroundImagePath));
-        if (!bgImage.isNull()) {
-            if (useCalibration) {
-                // 校准模式：背景画到主图
-                QPainter bgPainter(&image);
-                bgPainter.drawImage(image.rect(), bgImage.scaled(data.scaledWidth, data.scaledHeight,
-                                     Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-                bgPainter.end();
-            } else {
-                painter.drawImage(image.rect(), bgImage.scaled(data.scaledWidth, data.scaledHeight,
-                                   Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-            }
+        QString bgPath = QString::fromStdString(data.params.backgroundImagePath);
+        QImageReader reader(bgPath);
+        reader.setAutoTransform(true);
+        if (reader.canRead()) {
+            bgImage = reader.read();
         }
+        if (bgImage.isNull() || bgImage.width() < 1 || bgImage.height() < 1) {
+            bgImage = QImage();  // 确保为 null，禁用校准
+            useCalibration = false;
+        }
+    } else {
+        useCalibration = false;
+    }
+    
+    if (useCalibration) {
+        // 校准模式：背景画到主图
+        QPainter bgPainter(&image);
+        bgPainter.drawImage(image.rect(), bgImage.scaled(data.scaledWidth, data.scaledHeight,
+                             Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        bgPainter.end();
+    } else if (!bgImage.isNull()) {
+        painter.drawImage(image.rect(), bgImage.scaled(data.scaledWidth, data.scaledHeight,
+                           Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
     }
     
     // 纸张纹理（校准模式下跳过，因为纹理线无法透视变换）
