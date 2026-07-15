@@ -440,88 +440,7 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
                                                               int contentWidth) {
     std::vector<PageRenderData> pageDataList;
     
-    // 竖排模式
-    if (m_params.textDirection == TextDirection::Vertical) {
-        int scaledTopMargin = m_params.topMargin * m_params.rate;
-        int scaledBottomMargin = m_params.bottomMargin * m_params.rate;
-        int scaledLeftMargin = m_params.leftMargin * m_params.rate;
-        int scaledRightMargin = m_params.rightMargin * m_params.rate;
-        int lineHeight = m_params.lineSpacing * m_params.rate;
-        int wordSpacing = m_params.wordSpacing * m_params.rate;
-        
-        QFontMetrics fm(font);
-        int columnWidth = fm.maxWidth() + wordSpacing;
-        int contentHeight = scaledHeight - scaledTopMargin - scaledBottomMargin;
-        int charsPerColumn = std::max(1, contentHeight / lineHeight);
-        
-        QString qText = QString::fromStdString(text);
-        QStringList paragraphs = qText.split("\n\n");
-        
-        std::vector<std::pair<QString, QFont>> currentPage;
-        std::vector<qreal> currentPageYPositions;
-        std::vector<std::vector<int>> currentPageCharIndexMap;
-        
-        qreal colX = scaledWidth - scaledRightMargin - columnWidth;
-        int globalCharIndex = 0;
-        
-        std::random_device rd;
-        std::mt19937 seedRng(rd());
-        
-        auto flushPage = [&]() {
-            PageRenderData pd;
-            pd.pageIndex = static_cast<int>(pageDataList.size());
-            pd.lines = std::move(currentPage);
-            pd.scaledWidth = scaledWidth;
-            pd.scaledHeight = scaledHeight;
-            pd.params = m_params;
-            pd.rng.seed(seedRng());
-            pd.charIndexMap = std::move(currentPageCharIndexMap);
-            pd.lineYPositions = std::move(currentPageYPositions);
-            pageDataList.push_back(std::move(pd));
-            currentPage.clear(); currentPageYPositions.clear(); currentPageCharIndexMap.clear();
-            colX = scaledWidth - scaledRightMargin - columnWidth;
-        };
-        
-        for (const QString& para : paragraphs) {
-            if (para.trimmed().isEmpty()) continue;
-            QString col;
-            std::vector<int> colIndices;
-            
-            for (QChar ch : para) {
-                if (ch == '\n') continue;
-                if (col.size() >= charsPerColumn) {
-                    if (colX < scaledLeftMargin) flushPage();
-                    currentPage.push_back({col, font});
-                    currentPageYPositions.push_back(colX);
-                    currentPageCharIndexMap.push_back(std::move(colIndices));
-                    colX -= columnWidth;
-                    col.clear();
-                    colIndices.clear();
-                }
-                col += ch;
-                colIndices.push_back(globalCharIndex++);
-            }
-            // 段落末：保留当前列，下一段从新列开始
-            if (!col.isEmpty()) {
-                if (colX < scaledLeftMargin) flushPage();
-                currentPage.push_back({col, font});
-                currentPageYPositions.push_back(colX);
-                currentPageCharIndexMap.push_back(std::move(colIndices));
-                colX -= columnWidth;
-            }
-        }
-        
-        if (!currentPage.empty()) flushPage();
-        if (pageDataList.empty()) {
-            PageRenderData pd; pd.pageIndex = 0;
-            pd.scaledWidth = scaledWidth; pd.scaledHeight = scaledHeight;
-            pd.params = m_params; pd.rng.seed(seedRng());
-            pageDataList.push_back(std::move(pd));
-        }
-        return pageDataList;
-    }
-    
-    // ---- 横排模式（原有逻辑）----
+    // ---- 横排/竖排共用的正常布局 ----
     
     int scaledTopMargin = m_params.topMargin * m_params.rate;
     int scaledBottomMargin = m_params.bottomMargin * m_params.rate;
@@ -775,11 +694,10 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     
     // 决定在哪个画布上绘制文字
     QImage* textCanvas = &image;  // 默认直接画在主图上
-    QImage textOverlay;           // 校准模式下单独的文字画布
-    QPoint textOffset(0, 0);
+    QImage textOverlay;           // 校准/竖排模式下单独的文字画布
+    bool needTextOverlay = useCalibration || (data.params.textDirection == TextDirection::Vertical);
     
-    if (useCalibration) {
-        // 文字先画到独立的透明画布，再透视变换到主图
+    if (needTextOverlay) {
         textOverlay = QImage(data.scaledWidth, data.scaledHeight, QImage::Format_ARGB32);
         textOverlay.fill(Qt::transparent);
         textCanvas = &textOverlay;
@@ -830,36 +748,10 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     
     std::mt19937 localRng = data.rng;
     bool usePrecomputedY = (data.lineYPositions.size() == data.lines.size());
-    bool isVertical = (data.params.textDirection == TextDirection::Vertical);
     
     for (size_t lineIdx = 0; lineIdx < data.lines.size(); ++lineIdx) {
         const auto& [line, font] = data.lines[lineIdx];
         QFontMetrics fm(font);
-        
-        if (isVertical) {
-            // 竖排：每条 "line" 是一列，lineYPositions[i] = 列 X 坐标
-            if (!usePrecomputedY) continue;
-            qreal colX = data.lineYPositions[lineIdx];
-            qreal charY = contentTop + fm.ascent();
-            int charIdxBase = 0;
-            if (lineIdx < data.charIndexMap.size()) {
-                charIdxBase = data.charIndexMap[lineIdx].empty() ? 0 : data.charIndexMap[lineIdx][0];
-            }
-            
-            for (int ci = 0; ci < line.size(); ++ci) {
-                if (charY + fm.descent() > contentBottom) break;
-                painter.setFont(font);
-                qreal dx = 0, dy = 0;
-                painter.save();
-                drawTextWithPerturbationStatic(painter, QString(line[ci]), colX, charY, font,
-                    data.params.wordSpacing * data.params.rate,
-                    data.params, localRng, charIdxBase + ci, nullptr);
-                painter.restore();
-                charY += data.params.lineSpacing * data.params.rate +
-                    gaussianRandomStatic(data.params.lineSpacingSigma * data.params.rate, localRng);
-            }
-            continue;
-        }
         
         // 横排
         qreal y;
@@ -888,6 +780,29 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     }
     
     painter.end();
+    
+    // 竖排模式：将文字画布旋转 90°
+    if (data.params.textDirection == TextDirection::Vertical) {
+        QTransform rot;
+        rot.rotate(90);
+        textOverlay = textOverlay.transformed(rot, Qt::SmoothTransformation);
+        // 缩放到页面尺寸
+        QImage basis(data.scaledWidth, data.scaledHeight, QImage::Format_ARGB32);
+        basis.fill(Qt::transparent);
+        QPainter rp(&basis);
+        rp.drawImage(basis.rect(), textOverlay.scaled(data.scaledWidth, data.scaledHeight,
+                     Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        rp.end();
+        textOverlay = basis;
+        
+        if (!useCalibration) {
+            // 非校准竖排：画文字到主图
+            QPainter finalPainter(&image);
+            finalPainter.drawImage(0, 0, textOverlay);
+            finalPainter.end();
+            // 后续步骤跳过
+        }
+    }
     
     // 网格形变：将文字画布映射到背景图片的校准区域
     if (useCalibration) {

@@ -5,7 +5,7 @@
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("HandWrite");
-    app.setApplicationVersion("2.4.0");
+    app.setApplicationVersion("2.4.1");
     app.setOrganizationName("HandWrite");
     
     try {
