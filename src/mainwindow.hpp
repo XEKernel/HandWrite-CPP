@@ -71,6 +71,7 @@ private:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
     QPointF toImageCoords(const QPoint& widgetPos) const;
     QPoint toWidgetCoords(const QPointF& imgPos) const;
     void addRow();

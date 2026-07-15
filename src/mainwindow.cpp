@@ -1067,6 +1067,10 @@ void CalibrationDialog::mouseMoveEvent(QMouseEvent* ev) {
     }
 }
 
+void CalibrationDialog::mouseReleaseEvent(QMouseEvent*) {
+    m_dragIdx = -1;
+}
+
 //=============================================================================
 // 缩放
 //=============================================================================
