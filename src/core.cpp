@@ -709,12 +709,7 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     // 背景图片（画在主图上或文字画布上）
     QImage bgImage;
     if (!data.params.backgroundImagePath.empty()) {
-        QString bgPath = QString::fromStdString(data.params.backgroundImagePath);
-        QImageReader reader(bgPath);
-        reader.setAutoTransform(true);
-        if (reader.canRead()) {
-            bgImage = reader.read();
-        }
+        bgImage = loadImageWithWebpFallback(data.params.backgroundImagePath);
         if (bgImage.isNull() || bgImage.width() < 1 || bgImage.height() < 1) {
             bgImage = QImage();  // 确保为 null，禁用校准
             useCalibration = false;

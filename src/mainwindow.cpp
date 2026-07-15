@@ -903,17 +903,10 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     : QDialog(parent), m_rows(3), m_cols(3) {
     setWindowTitle(tr("网格校准 — 拖拽锚点适应纸面弯曲"));
     
-    // 使用 QImageReader 预检查，防止损坏图片导致的崩溃
-    QImageReader reader(imagePath);
-    reader.setAutoTransform(true);
-    if (!reader.canRead()) {
-        QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片（格式不支持或文件损坏）"));
-        reject();
-        return;
-    }
-    m_image = reader.read();
+    // 使用统一加载器（含 WebP 回退）
+    m_image = loadImageWithWebpFallback(imagePath.toStdString());
     if (m_image.isNull()) {
-        QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片"));
+        QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片（格式不支持或文件损坏）"));
         reject();
         return;
     }
@@ -1184,7 +1177,7 @@ void MainWindow::showAboutDialog() {
     about.setIconPixmap(QPixmap(":/resources/app.ico").scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     about.setTextFormat(Qt::RichText);
     about.setText(QString(
-        "<h3>HandWrite Generator v2.2</h3>"
+        "<h3>HandWrite Generator v2.3</h3>"
         "<p>手写作业生成器 — 将电子文本渲染为模拟手写效果</p>"
         "<p>作者: <b>XEKernel</b></p>"
         "<p>代码仓库: <a href='https://github.com/XEKernel/HandWrite-CPP'>github.com/XEKernel/HandWrite-CPP</a></p>"

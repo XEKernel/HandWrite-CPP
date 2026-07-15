@@ -6,6 +6,8 @@
 #include <map>
 #include <tuple>
 #include <filesystem>
+#include <QImage>
+#include <QImageReader>
 
 namespace HandWrite {
 
@@ -86,6 +88,9 @@ private:
     void initializePaperSizes();
     void initializePaperTextures();
 };
+
+// 通用图片加载（含 WebP 回退）
+QImage loadImageWithWebpFallback(const std::string& filePath);
 
 } // namespace HandWrite
 #endif // TOOLS_HPP

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(HandWrite VERSION 2.2.0 LANGUAGES CXX)
+project(HandWrite VERSION 2.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -88,6 +88,7 @@ target_link_libraries(${PROJECT_NAME}
     Qt6::Widgets
     Qt6::Concurrent
     Qt6::PrintSupport
+    webp
 )
 
 # Platform-specific executable properties
@@ -158,6 +159,7 @@ target_link_libraries(handwrite-cli
     Qt6::Gui
     Qt6::Concurrent
     Qt6::PrintSupport
+    webp
 )
 if(WIN32)
     set_target_properties(handwrite-cli PROPERTIES WIN32_EXECUTABLE FALSE)

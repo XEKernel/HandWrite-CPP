@@ -1,6 +1,9 @@
 #include "tools.hpp"
 #include <iostream>
 #include <algorithm>
+#include <QFile>
+#include <QFileInfo>
+#include <QBuffer>
 
 namespace HandWrite {
 
@@ -211,6 +214,47 @@ std::pair<std::vector<std::string>, std::vector<std::string>> BasicTools::getTtf
     }
     
     return {names, paths};
+}
+
+//=============================================================================
+// 通用图片加载（QImageReader → WebP 回退）
+//=============================================================================
+
+#include <webp/decode.h>
+
+QImage loadImageWithWebpFallback(const std::string& filePath) {
+    QString qPath = QString::fromStdString(filePath);
+    
+    // 1. 尝试 QImageReader
+    QImageReader reader(qPath);
+    reader.setAutoTransform(true);
+    if (reader.canRead()) {
+        QImage img = reader.read();
+        if (!img.isNull() && img.width() > 0) return img;
+    }
+    
+    // 2. WebP 回退（MSYS2 Qt6 无 qwebp 插件，用 libwebp 解码）
+    QString ext = QFileInfo(qPath).suffix().toLower();
+    if (ext == "webp") {
+        QFile file(qPath);
+        if (!file.open(QIODevice::ReadOnly)) return QImage();
+        QByteArray data = file.readAll();
+        file.close();
+        
+        int w = 0, h = 0;
+        if (!WebPGetInfo(reinterpret_cast<const uint8_t*>(data.data()), data.size(), &w, &h))
+            return QImage();
+        
+        QImage img(w, h, QImage::Format_ARGB32);
+        // ARGB32 在小端序下的内存布局 = [B,G,R,A]，与 WebPDecodeBGRAInto 输出一致
+        uint8_t* dst = WebPDecodeBGRAInto(
+            reinterpret_cast<const uint8_t*>(data.data()), data.size(),
+            reinterpret_cast<uint8_t*>(img.bits()), img.sizeInBytes(), img.bytesPerLine());
+        if (!dst) return QImage();
+        return img;
+    }
+    
+    return QImage();
 }
 
 } // namespace HandWrite
