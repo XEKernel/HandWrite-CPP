@@ -669,7 +669,7 @@ void MainWindow::onPushButtonPrintClicked() {
 //=============================================================================
 
 void MainWindow::onPushButtonSelectBgImageClicked() {
-    QString path=QFileDialog::getOpenFileName(this,tr("选择背景图片"),"",tr("Images (*.png *.jpg *.jpeg *.bmp)"));
+    QString path=QFileDialog::getOpenFileName(this,tr("选择背景图片"),"",tr("Images (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.tif *.gif *.ico *.pbm *.pgm *.ppm *.xbm *.xpm)"));
     if(path.isEmpty())return;
     m_bgImagePath=path;
     m_labelBgImage->setText(QFileInfo(path).fileName());
@@ -1184,7 +1184,7 @@ void MainWindow::showAboutDialog() {
     about.setIconPixmap(QPixmap(":/resources/app.ico").scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     about.setTextFormat(Qt::RichText);
     about.setText(QString(
-        "<h3>HandWrite Generator v2.1</h3>"
+        "<h3>HandWrite Generator v2.2</h3>"
         "<p>手写作业生成器 — 将电子文本渲染为模拟手写效果</p>"
         "<p>作者: <b>XEKernel</b></p>"
         "<p>代码仓库: <a href='https://github.com/XEKernel/HandWrite-CPP'>github.com/XEKernel/HandWrite-CPP</a></p>"
