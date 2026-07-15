@@ -440,6 +440,89 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
                                                               int contentWidth) {
     std::vector<PageRenderData> pageDataList;
     
+    // 竖排模式
+    if (m_params.textDirection == TextDirection::Vertical) {
+        int scaledTopMargin = m_params.topMargin * m_params.rate;
+        int scaledBottomMargin = m_params.bottomMargin * m_params.rate;
+        int scaledLeftMargin = m_params.leftMargin * m_params.rate;
+        int scaledRightMargin = m_params.rightMargin * m_params.rate;
+        int lineHeight = m_params.lineSpacing * m_params.rate;
+        int wordSpacing = m_params.wordSpacing * m_params.rate;
+        
+        QFontMetrics fm(font);
+        int columnWidth = fm.maxWidth() + wordSpacing;
+        int contentHeight = scaledHeight - scaledTopMargin - scaledBottomMargin;
+        int charsPerColumn = std::max(1, contentHeight / lineHeight);
+        
+        QString qText = QString::fromStdString(text);
+        QStringList paragraphs = qText.split("\n\n");
+        
+        std::vector<std::pair<QString, QFont>> currentPage;
+        std::vector<qreal> currentPageYPositions;
+        std::vector<std::vector<int>> currentPageCharIndexMap;
+        
+        qreal colX = scaledWidth - scaledRightMargin - columnWidth;
+        int globalCharIndex = 0;
+        
+        std::random_device rd;
+        std::mt19937 seedRng(rd());
+        
+        auto flushPage = [&]() {
+            PageRenderData pd;
+            pd.pageIndex = static_cast<int>(pageDataList.size());
+            pd.lines = std::move(currentPage);
+            pd.scaledWidth = scaledWidth;
+            pd.scaledHeight = scaledHeight;
+            pd.params = m_params;
+            pd.rng.seed(seedRng());
+            pd.charIndexMap = std::move(currentPageCharIndexMap);
+            pd.lineYPositions = std::move(currentPageYPositions);
+            pageDataList.push_back(std::move(pd));
+            currentPage.clear(); currentPageYPositions.clear(); currentPageCharIndexMap.clear();
+            colX = scaledWidth - scaledRightMargin - columnWidth;
+        };
+        
+        for (const QString& para : paragraphs) {
+            if (para.trimmed().isEmpty()) continue;
+            QString col;
+            std::vector<int> colIndices;
+            
+            for (QChar ch : para) {
+                if (ch == '\n') continue;
+                if (col.size() >= charsPerColumn) {
+                    if (colX < scaledLeftMargin) flushPage();
+                    currentPage.push_back({col, font});
+                    currentPageYPositions.push_back(colX);
+                    currentPageCharIndexMap.push_back(std::move(colIndices));
+                    colX -= columnWidth;
+                    col.clear();
+                    colIndices.clear();
+                }
+                col += ch;
+                colIndices.push_back(globalCharIndex++);
+            }
+            // 段落末：保留当前列，下一段从新列开始
+            if (!col.isEmpty()) {
+                if (colX < scaledLeftMargin) flushPage();
+                currentPage.push_back({col, font});
+                currentPageYPositions.push_back(colX);
+                currentPageCharIndexMap.push_back(std::move(colIndices));
+                colX -= columnWidth;
+            }
+        }
+        
+        if (!currentPage.empty()) flushPage();
+        if (pageDataList.empty()) {
+            PageRenderData pd; pd.pageIndex = 0;
+            pd.scaledWidth = scaledWidth; pd.scaledHeight = scaledHeight;
+            pd.params = m_params; pd.rng.seed(seedRng());
+            pageDataList.push_back(std::move(pd));
+        }
+        return pageDataList;
+    }
+    
+    // ---- 横排模式（原有逻辑）----
+    
     int scaledTopMargin = m_params.topMargin * m_params.rate;
     int scaledBottomMargin = m_params.bottomMargin * m_params.rate;
     int lineHeight = m_params.lineSpacing * m_params.rate;
@@ -743,19 +826,46 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     
     qreal contentLeft = data.params.leftMargin * data.params.rate;
     qreal contentBottom = data.scaledHeight - data.params.bottomMargin * data.params.rate;
+    qreal contentTop = data.params.topMargin * data.params.rate;
     
     std::mt19937 localRng = data.rng;
     bool usePrecomputedY = (data.lineYPositions.size() == data.lines.size());
+    bool isVertical = (data.params.textDirection == TextDirection::Vertical);
     
     for (size_t lineIdx = 0; lineIdx < data.lines.size(); ++lineIdx) {
         const auto& [line, font] = data.lines[lineIdx];
         QFontMetrics fm(font);
         
+        if (isVertical) {
+            // 竖排：每条 "line" 是一列，lineYPositions[i] = 列 X 坐标
+            if (!usePrecomputedY) continue;
+            qreal colX = data.lineYPositions[lineIdx];
+            qreal charY = contentTop + fm.ascent();
+            int charIdxBase = 0;
+            if (lineIdx < data.charIndexMap.size()) {
+                charIdxBase = data.charIndexMap[lineIdx].empty() ? 0 : data.charIndexMap[lineIdx][0];
+            }
+            
+            for (int ci = 0; ci < line.size(); ++ci) {
+                if (charY + fm.descent() > contentBottom) break;
+                painter.setFont(font);
+                qreal dx = 0, dy = 0;
+                painter.save();
+                drawTextWithPerturbationStatic(painter, QString(line[ci]), colX, charY, font,
+                    data.params.wordSpacing * data.params.rate,
+                    data.params, localRng, charIdxBase + ci, nullptr);
+                painter.restore();
+                charY += data.params.lineSpacing * data.params.rate +
+                    gaussianRandomStatic(data.params.lineSpacingSigma * data.params.rate, localRng);
+            }
+            continue;
+        }
+        
+        // 横排
         qreal y;
         if (usePrecomputedY) {
             y = data.lineYPositions[lineIdx];
         } else {
-            qreal contentTop = data.params.topMargin * data.params.rate;
             y = contentTop + fm.ascent();
             for (size_t j = 0; j < lineIdx; ++j) {
                 y += data.params.lineSpacing * data.params.rate;

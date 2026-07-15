@@ -171,6 +171,7 @@ private:
     QComboBox *m_comboTexture;
     QDoubleSpinBox *m_spinTextureOpacity;
     QCheckBox *m_checkParagraphIndent;
+    QComboBox *m_comboTextDirection;
     QSpinBox *m_spinParagraphSpacing;
     QCheckBox *m_checkInkBleed;
     QDoubleSpinBox *m_spinInkBleedRadius;

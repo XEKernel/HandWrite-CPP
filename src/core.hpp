@@ -76,6 +76,11 @@ struct StyledSpan {
 // 模板参数（大幅扩展）
 //=============================================================================
 //=============================================================================
+// 文字方向
+//=============================================================================
+enum class TextDirection { Horizontal, Vertical };
+
+//=============================================================================
 // 背景图片网格校准（NxM 锚点，支持弯曲纸面）
 //=============================================================================
 struct BackgroundCalibration {
@@ -130,6 +135,7 @@ struct TemplateParams {
     int rightMargin = 10;
     bool paragraphIndent = true;          // 段首缩进两字符
     int paragraphSpacing = 0;             // 段间距（额外行间距像素）
+    TextDirection textDirection = TextDirection::Horizontal;  // 文字方向
 
     // --- 扰动 ---
     double lineSpacingSigma = 1.0;

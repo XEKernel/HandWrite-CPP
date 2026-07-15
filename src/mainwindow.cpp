@@ -263,6 +263,17 @@ void MainWindow::setupDynamicUi() {
     paraLayout->addWidget(m_checkParagraphIndent);
     paraLayout->addLayout(psLayout);
     
+    // 文字方向
+    auto *dirLayout = new QHBoxLayout();
+    dirLayout->addWidget(new QLabel(tr("文字方向:"), paraGroup));
+    auto *comboDir = new QComboBox(paraGroup);
+    comboDir->addItem(tr("横排"), 0);
+    comboDir->addItem(tr("竖排"), 1);
+    connect(comboDir, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onParameterChanged);
+    m_comboTextDirection = comboDir;
+    dirLayout->addWidget(comboDir); dirLayout->addStretch();
+    paraLayout->addLayout(dirLayout);
+    
     // 笔触效果
     auto *effectGroup = new QGroupBox(tr("笔触效果"), scrollContent);
     auto *effectLayout = new QVBoxLayout(effectGroup);
@@ -518,6 +529,7 @@ TemplateParams MainWindow::getParamsFromForm() {
     p.bgCalibration=m_bgCalibration;
     p.paragraphIndent=m_checkParagraphIndent->isChecked();
     p.paragraphSpacing=m_spinParagraphSpacing->value();
+    p.textDirection = (m_comboTextDirection->currentIndex() == 1) ? TextDirection::Vertical : TextDirection::Horizontal;
     p.inkBleed=m_checkInkBleed->isChecked();
     p.inkBleedRadius=m_spinInkBleedRadius->value();
     p.strikeThroughRate=m_spinStrikeThroughRate->value();
@@ -1177,7 +1189,7 @@ void MainWindow::showAboutDialog() {
     about.setIconPixmap(QPixmap(":/resources/app.ico").scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     about.setTextFormat(Qt::RichText);
     about.setText(QString(
-        "<h3>HandWrite Generator v2.3</h3>"
+        "<h3>HandWrite Generator v2.4</h3>"
         "<p>手写作业生成器 — 将电子文本渲染为模拟手写效果</p>"
         "<p>作者: <b>XEKernel</b></p>"
         "<p>代码仓库: <a href='https://github.com/XEKernel/HandWrite-CPP'>github.com/XEKernel/HandWrite-CPP</a></p>"
