@@ -49,7 +49,7 @@ static std::string readFile(const std::string& path) {
 int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("HandWrite CLI");
-    app.setApplicationVersion("2.0.0");
+    app.setApplicationVersion("2.1.0");
     
     QCommandLineParser parser;
     parser.setApplicationDescription("手写作业生成器命令行工具");
