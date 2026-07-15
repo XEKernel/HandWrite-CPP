@@ -791,7 +791,7 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
         basis.fill(Qt::transparent);
         QPainter rp(&basis);
         rp.drawImage(basis.rect(), textOverlay.scaled(data.scaledWidth, data.scaledHeight,
-                     Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                     Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
         rp.end();
         textOverlay = basis;
         
