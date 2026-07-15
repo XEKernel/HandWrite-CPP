@@ -76,15 +76,33 @@ struct StyledSpan {
 // 模板参数（大幅扩展）
 //=============================================================================
 //=============================================================================
-// 背景图片校准锚点
+// 背景图片网格校准（NxM 锚点，支持弯曲纸面）
 //=============================================================================
 struct BackgroundCalibration {
     bool enabled = false;
-    QPointF topLeft, topRight, bottomRight, bottomLeft;
+    int rows = 3;                    // 网格行数
+    int cols = 3;                    // 网格列数
+    std::vector<QPointF> gridPoints; // rows*cols 个点，行主序，图片坐标空间
     
     bool isValid() const {
-        return enabled && topLeft != topRight && topRight != bottomRight 
-            && bottomRight != bottomLeft && bottomLeft != topLeft;
+        return enabled && rows >= 2 && cols >= 2 
+            && static_cast<int>(gridPoints.size()) == rows * cols;
+    }
+    
+    // row r, col c 处的网格点（r 从 0 开始）
+    QPointF at(int r, int c) const { return gridPoints[r * cols + c]; }
+    void set(int r, int c, const QPointF& p) { gridPoints[r * cols + c] = p; }
+    
+    // 初始化均匀网格
+    void initUniform(int imgWidth, int imgHeight) {
+        gridPoints.resize(rows * cols);
+        for (int r = 0; r < rows; ++r) {
+            qreal y = imgHeight * r / (rows - 1.0);
+            for (int c = 0; c < cols; ++c) {
+                qreal x = imgWidth * c / (cols - 1.0);
+                set(r, c, QPointF(x, y));
+            }
+        }
     }
 };
 
@@ -195,6 +213,12 @@ public:
 
     // 渲染和布局
     static QImage renderPageStatic(const PageRenderData& data);
+    
+    // 网格形变渲染
+    static void warpMesh(QPainter& painter, const QImage& source,
+                         const std::vector<QPointF>& srcGrid,
+                         const std::vector<QPointF>& dstGrid,
+                         int rows, int cols);
     std::vector<PageRenderData> layoutPages(const std::string& text, QFont& font,
                                              int scaledWidth, int scaledHeight,
                                              int contentWidth);

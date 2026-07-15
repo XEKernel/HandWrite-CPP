@@ -773,37 +773,35 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     
     painter.end();
     
-    // 透视变换：将文字画布映射到背景图片的校准区域
+    // 网格形变：将文字画布映射到背景图片的校准区域
     if (useCalibration) {
-        QPainter finalPainter(&image);
         auto& cal = data.params.bgCalibration;
         
-        // 计算缩放后的锚点坐标
+        // 缩放锚点到渲染画布坐标
         int bw = bgImage.width(); if (bw < 1) bw = 1;
         int bh = bgImage.height(); if (bh < 1) bh = 1;
         qreal sx = static_cast<qreal>(data.scaledWidth) / bw;
         qreal sy = static_cast<qreal>(data.scaledHeight) / bh;
         
-        QPolygonF targetQuad;
-        targetQuad << QPointF(cal.topLeft.x() * sx, cal.topLeft.y() * sy)
-                   << QPointF(cal.topRight.x() * sx, cal.topRight.y() * sy)
-                   << QPointF(cal.bottomRight.x() * sx, cal.bottomRight.y() * sy)
-                   << QPointF(cal.bottomLeft.x() * sx, cal.bottomLeft.y() * sy);
-        
-        QPolygonF sourceQuad;
-        sourceQuad << QPointF(0, 0)
-                   << QPointF(data.scaledWidth, 0)
-                   << QPointF(data.scaledWidth, data.scaledHeight)
-                   << QPointF(0, data.scaledHeight);
-        
-        QTransform warp;
-        bool ok = QTransform::quadToQuad(sourceQuad, targetQuad, warp);
-        
-        if (ok && !warp.isIdentity()) {
-            finalPainter.setTransform(warp);
-            finalPainter.setRenderHint(QPainter::SmoothPixmapTransform);
-            finalPainter.drawImage(0, 0, textOverlay);
+        int n = cal.rows * cal.cols;
+        std::vector<QPointF> dstGrid(n);
+        for (int i = 0; i < n; ++i) {
+            dstGrid[i] = QPointF(cal.gridPoints[i].x() * sx, cal.gridPoints[i].y() * sy);
         }
+        
+        // 源网格：均匀分布
+        std::vector<QPointF> srcGrid(n);
+        for (int r = 0; r < cal.rows; ++r) {
+            qreal y = data.scaledHeight * r / (cal.rows - 1.0);
+            for (int c = 0; c < cal.cols; ++c) {
+                qreal x = data.scaledWidth * c / (cal.cols - 1.0);
+                srcGrid[r * cal.cols + c] = QPointF(x, y);
+            }
+        }
+        
+        QPainter finalPainter(&image);
+        finalPainter.setRenderHint(QPainter::SmoothPixmapTransform);
+        warpMesh(finalPainter, textOverlay, srcGrid, dstGrid, cal.rows, cal.cols);
         finalPainter.end();
     }
     
@@ -986,6 +984,52 @@ std::vector<QChar> HandwriteGenerator::findUnsupportedCharsStatic(const std::str
         }
     }
     return unsupportedChars;
+}
+
+//=============================================================================
+// 网格形变渲染
+//=============================================================================
+
+void HandwriteGenerator::warpMesh(QPainter& painter, const QImage& source,
+                                   const std::vector<QPointF>& srcGrid,
+                                   const std::vector<QPointF>& dstGrid,
+                                   int rows, int cols) {
+    if (rows < 2 || cols < 2) return;
+    
+    for (int r = 0; r < rows - 1; ++r) {
+        for (int c = 0; c < cols - 1; ++c) {
+            // 获取源网格四角
+            QPointF s00 = srcGrid[r * cols + c];
+            QPointF s10 = srcGrid[r * cols + c + 1];
+            QPointF s11 = srcGrid[(r + 1) * cols + c + 1];
+            QPointF s01 = srcGrid[(r + 1) * cols + c];
+            
+            // 目标网格四角
+            QPointF d00 = dstGrid[r * cols + c];
+            QPointF d10 = dstGrid[r * cols + c + 1];
+            QPointF d11 = dstGrid[(r + 1) * cols + c + 1];
+            QPointF d01 = dstGrid[(r + 1) * cols + c];
+            
+            QPolygonF srcQuad;
+            srcQuad << s00 << s10 << s11 << s01;
+            QPolygonF dstQuad;
+            dstQuad << d00 << d10 << d11 << d01;
+            
+            QTransform warp;
+            QTransform::quadToQuad(srcQuad, dstQuad, warp);
+            
+            if (!warp.isIdentity()) {
+                // 裁剪到目标四边形区域
+                QPainterPath clip;
+                clip.addPolygon(dstQuad);
+                painter.save();
+                painter.setClipPath(clip);
+                painter.setTransform(warp);
+                painter.drawImage(0, 0, source);
+                painter.restore();
+            }
+        }
+    }
 }
 
 } // namespace HandWrite

@@ -895,13 +895,12 @@ void MainWindow::onComboBoxPaperTemplateCurrentIndexChanged(int) {
 }
 
 //=============================================================================
-// CalibrationDialog 实现
+// CalibrationDialog 实现 — 网格形变
 //=============================================================================
 
 CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent)
-    : QDialog(parent) {
-    setWindowTitle(tr("设置锚点 - 依次点击纸的左上、右上、右下、左下"));
-    resize(800, 600);
+    : QDialog(parent), m_rows(3), m_cols(3) {
+    setWindowTitle(tr("网格校准 — 拖拽锚点适应纸面弯曲"));
     
     m_image = QImage(imagePath);
     if (m_image.isNull()) {
@@ -911,40 +910,89 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     }
     
     m_scaledPixmap = QPixmap::fromImage(m_image.scaled(760, 520, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    setFixedSize(m_scaledPixmap.width() + 20, m_scaledPixmap.height() + 85);
+    int btnBarHeight = 75;
+    setFixedSize(m_scaledPixmap.width() + 20, m_scaledPixmap.height() + btnBarHeight);
     
-    // OK按钮
-    auto* btnOk = new QPushButton(tr("确定"), this);
-    btnOk->setGeometry((width() - 80) / 2, m_scaledPixmap.height() + 55, 80, 25);
-    btnOk->setEnabled(false);
-    connect(btnOk, &QPushButton::clicked, this, [this](){ if (m_currentPoint >= 4) accept(); });
-    // 当4个点都设好后启用确定按钮
-    auto updateBtn = [this, btnOk]() { btnOk->setEnabled(m_currentPoint >= 4); };
-    // 在mousePressEvent中也会更新
-    m_pointCompleteCallback = [this, btnOk]() { btnOk->setEnabled(m_currentPoint >= 4); };
-    
-    // 恢复已有校准点
+    // 恢复已有校准
     if (calib.enabled && calib.isValid()) {
-        m_points[0] = calib.topLeft;
-        m_points[1] = calib.topRight;
-        m_points[2] = calib.bottomRight;
-        m_points[3] = calib.bottomLeft;
-        m_currentPoint = 4;
+        m_rows = calib.rows;
+        m_cols = calib.cols;
+        m_points = calib.gridPoints;
+    } else {
+        buildUniformGrid();
     }
+    
+    // 底部按钮栏
+    int btnY = m_scaledPixmap.height() + 8;
+    int bw = 28, bh = 28, gap = 5;
+    
+    auto makeBtn = [&](const QString& text, int x) {
+        auto* b = new QPushButton(text, this);
+        b->setGeometry(x, btnY, bw, bh);
+        b->setFont(QFont("", 10));
+        return b;
+    };
+    
+    auto* btnColPlus = makeBtn("+", gap);
+    auto* btnColMinus = makeBtn("-", gap + bw + gap);
+    auto* lblCol = new QLabel(this);
+    lblCol->setText(QString("列:%1").arg(m_cols));
+    lblCol->setGeometry(gap + (bw+gap)*2, btnY, 50, bh);
+    lblCol->setStyleSheet("color: white;");
+    
+    auto* btnRowPlus = makeBtn("+", gap + (bw+gap)*2 + 55);
+    auto* btnRowMinus = makeBtn("-", gap + (bw+gap)*3 + 55);
+    auto* lblRow = new QLabel(this);
+    lblRow->setText(QString("行:%1").arg(m_rows));
+    lblRow->setGeometry(gap + (bw+gap)*4 + 55, btnY, 50, bh);
+    lblRow->setStyleSheet("color: white;");
+    
+    auto* btnReset = new QPushButton(tr("重置"), this);
+    btnReset->setGeometry(gap + (bw+gap)*4 + 115, btnY, 50, bh);
+    
+    auto* btnOk = new QPushButton(tr("确定"), this);
+    btnOk->setGeometry(width() - 90, btnY, 70, bh);
+    btnOk->setDefault(true);
+    
+    connect(btnColPlus, &QPushButton::clicked, this, [this, lblCol]() {
+        if (m_cols < 5) { m_cols++; buildUniformGrid(); lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+    });
+    connect(btnColMinus, &QPushButton::clicked, this, [this, lblCol]() {
+        if (m_cols > 2) { m_cols--; buildUniformGrid(); lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+    });
+    connect(btnRowPlus, &QPushButton::clicked, this, [this, lblRow]() {
+        if (m_rows < 5) { m_rows++; buildUniformGrid(); lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+    });
+    connect(btnRowMinus, &QPushButton::clicked, this, [this, lblRow]() {
+        if (m_rows > 2) { m_rows--; buildUniformGrid(); lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+    });
+    connect(btnReset, &QPushButton::clicked, this, [this]() { buildUniformGrid(); update(); });
+    connect(btnOk, &QPushButton::clicked, this, &QDialog::accept);
     
     setMouseTracking(true);
 }
 
+void CalibrationDialog::buildUniformGrid() {
+    m_points.resize(m_rows * m_cols);
+    for (int r = 0; r < m_rows; ++r) {
+        qreal y = m_image.height() * r / (m_rows - 1.0);
+        for (int c = 0; c < m_cols; ++c) {
+            qreal x = m_image.width() * c / (m_cols - 1.0);
+            m_points[r * m_cols + c] = QPointF(x, y);
+        }
+    }
+}
+
 BackgroundCalibration CalibrationDialog::getCalibration() const {
     BackgroundCalibration c;
-    c.enabled = (m_currentPoint >= 4);
-    c.topLeft = m_points[0];
-    c.topRight = m_points[1];
-    c.bottomRight = m_points[2];
-    c.bottomLeft = m_points[3];
+    c.enabled = true;
+    c.rows = m_rows;
+    c.cols = m_cols;
+    c.gridPoints = m_points;
     return c;
 }
 
+// 坐标转换保持不变
 QPointF CalibrationDialog::toImageCoords(const QPoint& widgetPos) const {
     qreal rx = static_cast<qreal>(m_image.width()) / m_scaledPixmap.width();
     qreal ry = static_cast<qreal>(m_image.height()) / m_scaledPixmap.height();
@@ -962,65 +1010,59 @@ void CalibrationDialog::paintEvent(QPaintEvent*) {
     p.fillRect(rect(), QColor(40, 40, 40));
     p.drawPixmap(0, 0, m_scaledPixmap);
     
-    // 绘制已设置的锚点和连线
-    QPen linePen(Qt::red, 2);
-    QPen pointPen(Qt::red);
-    p.setPen(Qt::NoPen);
+    // 网格线
+    QPen gridPen(QColor(0, 160, 255, 120), 1);
+    p.setPen(gridPen);
+    for (int r = 0; r < m_rows; ++r) {
+        for (int c = 0; c < m_cols - 1; ++c) {
+            p.drawLine(toWidgetCoords(m_points[r * m_cols + c]),
+                       toWidgetCoords(m_points[r * m_cols + c + 1]));
+        }
+    }
+    for (int r = 0; r < m_rows - 1; ++r) {
+        for (int c = 0; c < m_cols; ++c) {
+            p.drawLine(toWidgetCoords(m_points[r * m_cols + c]),
+                       toWidgetCoords(m_points[(r + 1) * m_cols + c]));
+        }
+    }
     
-    for (int i = 0; i < m_currentPoint; ++i) {
+    // 网格点
+    for (int i = 0; i < m_rows * m_cols; ++i) {
         QPoint wp = toWidgetCoords(m_points[i]);
-        p.setBrush(Qt::red);
-        p.drawEllipse(wp, 6, 6);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0, 160, 255));
+        p.drawEllipse(wp, 5, 5);
         p.setBrush(Qt::white);
-        p.drawEllipse(wp, 3, 3);
+        p.drawEllipse(wp, 2, 2);
     }
     
-    p.setPen(linePen);
-    for (int i = 0; i < m_currentPoint - 1; ++i) {
-        p.drawLine(toWidgetCoords(m_points[i]), toWidgetCoords(m_points[i + 1]));
-    }
-    if (m_currentPoint >= 4) {
-        p.drawLine(toWidgetCoords(m_points[3]), toWidgetCoords(m_points[0]));
-    }
-    
-    // 提示文字
-    p.setPen(Qt::white);
-    p.setFont(QFont("Microsoft YaHei", 10));
+    // 提示
+    p.setPen(QColor(200, 200, 200));
+    p.setFont(QFont("Microsoft YaHei", 9));
     int h = m_scaledPixmap.height();
-    if (m_currentPoint < 4) {
-        const char* labels[] = {"左上", "右上", "右下", "左下"};
-        p.drawText(5, h + 25, tr("请点击纸张的%1角").arg(labels[m_currentPoint]));
-    } else {
-        p.drawText(5, h + 25, tr("锚点已设置 (4/4) - 可拖拽调整，点击确定"));
-    }
+    p.drawText(5, h + 40, tr("拖拽蓝色锚点适应纸面弯曲 | %1×%2 网格 | 点击确定").arg(m_rows).arg(m_cols));
 }
 
 void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
     if (ev->button() != Qt::LeftButton) return;
     QPoint pos = ev->pos();
+    if (pos.y() > m_scaledPixmap.height()) return;  // 忽略按钮区
     
-    // 检查是否点击了已有的点（拖拽）
-    m_dragPoint = -1;
-    for (int i = 0; i < m_currentPoint; ++i) {
+    m_dragIdx = -1;
+    for (int i = 0; i < m_rows * m_cols; ++i) {
         QPoint wp = toWidgetCoords(m_points[i]);
-        if ((pos - wp).manhattanLength() < 12) {
-            m_dragPoint = i;
+        if ((pos - wp).manhattanLength() < 14) {
+            m_dragIdx = i;
             return;
         }
-    }
-    
-    // 设置新锚点
-    if (m_currentPoint < 4) {
-        m_points[m_currentPoint] = toImageCoords(pos);
-        m_currentPoint++;
-        if (m_currentPoint >= 4 && m_pointCompleteCallback) m_pointCompleteCallback();
-        update();
     }
 }
 
 void CalibrationDialog::mouseMoveEvent(QMouseEvent* ev) {
-    if (m_dragPoint >= 0) {
-        m_points[m_dragPoint] = toImageCoords(ev->pos());
+    if (m_dragIdx >= 0) {
+        QPoint pos = ev->pos();
+        if (pos.y() > m_scaledPixmap.height()) return;
+        m_points[m_dragIdx] = toImageCoords(pos);
         update();
     }
 }

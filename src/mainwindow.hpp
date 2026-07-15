@@ -60,7 +60,7 @@ private:
 };
 
 //=============================================================================
-// 背景图片锚点校准对话框
+// 背景图片网格校准对话框
 //=============================================================================
 class CalibrationDialog : public QDialog {
     Q_OBJECT
@@ -73,13 +73,17 @@ private:
     void mouseMoveEvent(QMouseEvent*) override;
     QPointF toImageCoords(const QPoint& widgetPos) const;
     QPoint toWidgetCoords(const QPointF& imgPos) const;
+    void addRow();
+    void removeRow();
+    void addCol();
+    void removeCol();
+    void buildUniformGrid();
+    
     QImage m_image;
     QPixmap m_scaledPixmap;
-    QRectF m_imageRect;
-    QPointF m_points[4];
-    int m_currentPoint = 0;
-    int m_dragPoint = -1;
-    std::function<void()> m_pointCompleteCallback;
+    int m_rows, m_cols;
+    std::vector<QPointF> m_points;  // 行主序，图片坐标
+    int m_dragIdx = -1;
 };
 
 class MainWindow : public QMainWindow {
