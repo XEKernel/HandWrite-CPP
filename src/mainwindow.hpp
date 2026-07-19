@@ -74,10 +74,6 @@ private:
     void mouseReleaseEvent(QMouseEvent*) override;
     QPointF toImageCoords(const QPoint& widgetPos) const;
     QPoint toWidgetCoords(const QPointF& imgPos) const;
-    void addRow();
-    void removeRow();
-    void addCol();
-    void removeCol();
     void buildUniformGrid();
     
     QImage m_image;
@@ -96,6 +92,8 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject *obj, QEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private slots:
     // 按钮
@@ -172,6 +170,7 @@ private:
     QDoubleSpinBox *m_spinTextureOpacity;
     QCheckBox *m_checkParagraphIndent;
     QComboBox *m_comboTextDirection;
+    QComboBox *m_comboTextWarp;
     QSpinBox *m_spinParagraphSpacing;
     QCheckBox *m_checkInkBleed;
     QDoubleSpinBox *m_spinInkBleedRadius;

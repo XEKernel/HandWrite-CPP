@@ -5,6 +5,7 @@
 #include <QtConcurrent>
 #include <QThreadPool>
 #include <QPrinter>
+#include <QSvgGenerator>
 #include <QPainterPath>
 #include <QLinearGradient>
 #include <algorithm>
@@ -190,8 +191,6 @@ int HandwriteGenerator::gaussianRandomIntStatic(double sigma, std::mt19937& rng)
 
 bool HandwriteGenerator::isStartChar(QChar c) const { return m_params.startChars.find(c.toLatin1()) != std::string::npos; }
 bool HandwriteGenerator::isEndChar(QChar c) const { return m_params.endChars.find(c.toLatin1()) != std::string::npos; }
-bool HandwriteGenerator::isStartCharStatic(QChar c, const std::string& startChars) { return startChars.find(c.toLatin1()) != std::string::npos; }
-bool HandwriteGenerator::isEndCharStatic(QChar c, const std::string& endChars) { return endChars.find(c.toLatin1()) != std::string::npos; }
 
 //=============================================================================
 // 纸张纹理绘制
@@ -338,7 +337,10 @@ void HandwriteGenerator::applyInkBleed(QImage& image, double radius) {
                 }
                 if (hasInk && count > 0) {
                     int alpha = qMin(40, 255 / (r * 2));
-                    image.setPixel(x, y, qRgba(rSum/count, gSum/count, bSum/count, alpha));
+                    image.setPixel(x, y, qRgba(
+                        static_cast<int>(std::round(static_cast<double>(rSum)/count)),
+                        static_cast<int>(std::round(static_cast<double>(gSum)/count)),
+                        static_cast<int>(std::round(static_cast<double>(bSum)/count)), alpha));
                 }
             }
         }
@@ -370,6 +372,9 @@ std::vector<std::string> HandwriteGenerator::layoutText(const QString& text, con
     QString currentLine;
     int currentWidth = 0;
     bool newParagraph = true; // 第一行是段首
+    bool hasFontOverride = false;
+    QFont overrideFont;
+    QFontMetrics* fmPtr = &fm;
     
     for (const auto& span : spans) {
         if (span.style == TextStyle::Separator) {
@@ -380,7 +385,12 @@ std::vector<std::string> HandwriteGenerator::layoutText(const QString& text, con
         }
         
         QString converted = convertChinesePunctuation(span.text);
-        int fs = span.fontSizeOverride > 0 ? span.fontSizeOverride * m_params.rate : 0;
+        hasFontOverride = span.fontSizeOverride > 0;
+        if (hasFontOverride) {
+            overrideFont = font;
+            overrideFont.setPixelSize(span.fontSizeOverride * m_params.rate);
+            fmPtr = new QFontMetrics(overrideFont);
+        }
         
         for (int i = 0; i < converted.length(); ++i) {
             QChar c = converted[i];
@@ -393,7 +403,7 @@ std::vector<std::string> HandwriteGenerator::layoutText(const QString& text, con
                 continue;
             }
             
-            int charWidth = fm.horizontalAdvance(c) + scaledWordSpacing;
+            int charWidth = fmPtr->horizontalAdvance(c) + scaledWordSpacing;
             
             // 段首缩进
             if (newParagraph && currentLine.isEmpty() && indentWidth > 0) {
@@ -415,7 +425,7 @@ std::vector<std::string> HandwriteGenerator::layoutText(const QString& text, con
                     currentLine.chop(1);
                     lines.push_back(currentLine.toStdString());
                     currentLine = lastChar;
-                    currentWidth = fm.horizontalAdvance(lastChar) + scaledWordSpacing;
+                    currentWidth = fmPtr->horizontalAdvance(lastChar) + scaledWordSpacing;
                 } else {
                     lines.push_back(currentLine.toStdString());
                     currentLine.clear(); currentWidth = 0;
@@ -428,6 +438,7 @@ std::vector<std::string> HandwriteGenerator::layoutText(const QString& text, con
     }
     
     if (!currentLine.isEmpty()) lines.push_back(currentLine.toStdString());
+    if (hasFontOverride) delete fmPtr;
     return lines;
 }
 
@@ -648,22 +659,28 @@ void HandwriteGenerator::drawTextWithPerturbationStatic(QPainter& painter, const
         
         // 涂改效果
         if (strikethrough) {
-            // 先绘制字符
-            if (std::abs(perturbTheta) > 0.001) {
+            bool rotated = std::abs(perturbTheta) > 0.001;
+            if (rotated) {
                 painter.translate(x + perturbX, y + perturbY);
                 painter.rotate(perturbTheta * 180.0 / M_PI);
                 painter.drawText(0, 0, QString(c));
             } else {
                 painter.drawText(x + perturbX, y + perturbY, QString(c));
             }
-            // 绘制横线删除标记
+            // 绘制横线删除标记（使用已变换坐标系）
             int charW = perturbedFm.horizontalAdvance(c);
-            int midY = static_cast<int>(y + perturbY - perturbedFm.ascent() / 2);
             QPen strikePen(QColor(80, 80, 80, 180));
             strikePen.setWidthF(1.5);
             painter.setPen(strikePen);
-            painter.drawLine(static_cast<int>(x + perturbX - 2), midY,
-                             static_cast<int>(x + perturbX + charW + 2), midY);
+            if (rotated) {
+                painter.drawLine(-2, -perturbedFm.ascent() / 2,
+                                 charW + 2, -perturbedFm.ascent() / 2);
+            } else {
+                painter.drawLine(static_cast<int>(x + perturbX - 2),
+                                 static_cast<int>(y + perturbY - perturbedFm.ascent() / 2),
+                                 static_cast<int>(x + perturbX + charW + 2),
+                                 static_cast<int>(y + perturbY - perturbedFm.ascent() / 2));
+            }
         } else {
             if (std::abs(perturbTheta) > 0.001) {
                 painter.translate(x + perturbX, y + perturbY);
@@ -768,12 +785,34 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
         qreal x = contentLeft;
         painter.setFont(font);
         
+        // 文字变形模板：调整 y 位置
+        qreal warpY = y;
+        if (data.params.textWarp != TextWarp::None) {
+            double lineWidth = data.scaledWidth * 0.8;
+            double centerX = contentLeft + (data.scaledWidth - contentLeft) * 0.2;
+            double phase = (x - centerX) / lineWidth;  // -0.5 .. 0.5
+            switch (data.params.textWarp) {
+                case TextWarp::Arc:
+                    warpY -= std::sin(phase * M_PI) * data.scaledHeight * 0.12;
+                    break;
+                case TextWarp::Wave:
+                    warpY += std::sin(phase * M_PI * 4 + lineIdx * 0.5) * (data.params.lineSpacing * data.params.rate) * 0.8;
+                    break;
+                case TextWarp::Circle:
+                    warpY = contentTop + (data.params.lineSpacing * data.params.rate) * 2 + 
+                            std::sin((x - data.scaledWidth * 0.5) / data.scaledWidth * M_PI * 2) 
+                            * data.scaledHeight * 0.3;
+                    break;
+                default: break;
+            }
+        }
+        
         const std::vector<int>* lineCharIndexMap = nullptr;
         if (lineIdx < data.charIndexMap.size()) {
             lineCharIndexMap = &data.charIndexMap[lineIdx];
         }
         
-        drawTextWithPerturbationStatic(painter, line, x, y, font,
+        drawTextWithPerturbationStatic(painter, line, x, warpY, font,
                                        data.params.wordSpacing * data.params.rate,
                                        data.params, localRng, 0, lineCharIndexMap);
     }
@@ -882,9 +921,13 @@ std::map<int, std::string> HandwriteGenerator::generateImage(const std::string& 
                                                               const std::string& outputDir) {
     std::map<int, std::string> filePaths;
     QDir dir;
-    if (!dir.exists(QString::fromStdString(outputDir))) dir.mkpath(QString::fromStdString(outputDir));
-    QDir(QString::fromStdString(outputDir)).removeRecursively();
-    dir.mkpath(QString::fromStdString(outputDir));
+    QString qDir = QString::fromStdString(outputDir);
+    if (!dir.exists(qDir)) dir.mkpath(qDir);
+    // 安全检查：仅对非系统根目录执行递归删除
+    if (qDir != "/" && qDir != "C:/" && qDir != "D:/" && !qDir.endsWith(":/")) {
+        QDir(qDir).removeRecursively();
+    }
+    dir.mkpath(qDir);
     
     auto images = generatePreview(text);
     for (size_t i = 0; i < images.size(); ++i) {
@@ -933,9 +976,13 @@ std::map<int, std::string> HandwriteGenerator::generateImageParallel(const std::
                                                                       std::function<void(int, int)> progressCallback) {
     std::map<int, std::string> filePaths;
     QDir dir;
-    if (!dir.exists(QString::fromStdString(outputDir))) dir.mkpath(QString::fromStdString(outputDir));
-    QDir(QString::fromStdString(outputDir)).removeRecursively();
-    dir.mkpath(QString::fromStdString(outputDir));
+    QString qDir = QString::fromStdString(outputDir);
+    if (!dir.exists(qDir)) dir.mkpath(qDir);
+    // 安全检查：仅对非系统根目录执行递归删除
+    if (qDir != "/" && qDir != "C:/" && qDir != "D:/" && !qDir.endsWith(":/")) {
+        QDir(qDir).removeRecursively();
+    }
+    dir.mkpath(qDir);
     
     if (threadCount <= 0) { threadCount = QThread::idealThreadCount(); if (threadCount <= 0) threadCount = 4; }
     
@@ -1000,6 +1047,33 @@ bool HandwriteGenerator::exportPdf(const std::string& text, const std::string& p
         int x = static_cast<int>((pageRect.width() - scaled.width()) / 2);
         int y = static_cast<int>((pageRect.height() - scaled.height()) / 2);
         painter.drawImage(x, y, scaled);
+    }
+    painter.end();
+    return true;
+}
+
+//=============================================================================
+// SVG 导出
+//=============================================================================
+
+bool HandwriteGenerator::exportSvg(const std::string& text, const std::string& svgPath) {
+    auto images = generatePreview(text);
+    if (images.empty()) return false;
+    
+    QSvgGenerator generator;
+    generator.setFileName(QString::fromStdString(svgPath));
+    generator.setSize(QSize(m_params.paperWidth * m_params.rate,
+                            m_params.paperHeight * m_params.rate));
+    generator.setViewBox(QRect(0, 0, m_params.paperWidth * m_params.rate,
+                                m_params.paperHeight * m_params.rate));
+    generator.setTitle("HandWrite Export");
+    
+    QPainter painter;
+    if (!painter.begin(&generator)) return false;
+    
+    for (size_t i = 0; i < images.size(); ++i) {
+        if (i > 0) break;  // SVG 仅支持单页
+        painter.drawImage(0, 0, images[i]);
     }
     painter.end();
     return true;

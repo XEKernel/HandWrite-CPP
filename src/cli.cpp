@@ -49,7 +49,7 @@ static std::string readFile(const std::string& path) {
 int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("HandWrite CLI");
-    app.setApplicationVersion("2.4.4");
+    app.setApplicationVersion("2.5.0");
     
     QCommandLineParser parser;
     parser.setApplicationDescription("手写作业生成器命令行工具");
@@ -62,6 +62,7 @@ int main(int argc, char* argv[]) {
     QCommandLineOption presetOpt({"p","preset"}, "预设配置", "file");
     QCommandLineOption rateOpt({"r","rate"}, "分辨率倍率", "rate", "4");
     QCommandLineOption formatOpt({"f","format"}, "输出格式 (png/pdf)", "fmt", "png");
+    QCommandLineOption batchOpt({"b","batch"}, "批量处理: 每行一个文件路径的列表文件", "batchfile");
     
     parser.addOption(inputOpt);
     parser.addOption(textOpt);
@@ -69,6 +70,7 @@ int main(int argc, char* argv[]) {
     parser.addOption(presetOpt);
     parser.addOption(rateOpt);
     parser.addOption(formatOpt);
+    parser.addOption(batchOpt);
     parser.process(app);
     
     // 获取文本
@@ -131,6 +133,23 @@ int main(int argc, char* argv[]) {
     
     std::string outputDir = parser.value(outputOpt).toStdString();
     std::string format = parser.value(formatOpt).toStdString();
+    
+    // 批量模式
+    if (parser.isSet(batchOpt)) {
+        std::ifstream batchFile(parser.value(batchOpt).toStdString());
+        if (!batchFile) { std::cerr << "错误: 无法打开批处理文件" << std::endl; return 1; }
+        std::string line;
+        int count = 0;
+        while (std::getline(batchFile, line)) {
+            if (line.empty()) continue;
+            std::string itemOutput = outputDir + "/" + std::to_string(count);
+            auto result = generator.generateImageParallel(readFile(line), itemOutput);
+            std::cout << "[" << count << "] " << line << " -> " << result.size() << " 页" << std::endl;
+            count++;
+        }
+        std::cout << "批量完成! 共处理 " << count << " 个文件" << std::endl;
+        return 0;
+    }
     
     std::cout << "正在生成手写内容..." << std::endl;
     std::cout << "  文本长度: " << text.length() << " 字符" << std::endl;

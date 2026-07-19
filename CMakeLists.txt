@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(HandWrite VERSION 2.4.4 LANGUAGES CXX)
+project(HandWrite VERSION 2.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +18,7 @@ endif()
 set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 
 # Qt6 packages
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Concurrent PrintSupport)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Concurrent PrintSupport Svg)
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -88,6 +88,7 @@ target_link_libraries(${PROJECT_NAME}
     Qt6::Widgets
     Qt6::Concurrent
     Qt6::PrintSupport
+    Qt6::Svg
     webp
 )
 
@@ -159,6 +160,7 @@ target_link_libraries(handwrite-cli
     Qt6::Gui
     Qt6::Concurrent
     Qt6::PrintSupport
+    Qt6::Svg
     webp
 )
 if(WIN32)

@@ -1,6 +1,5 @@
 #include "config.hpp"
 #include <iostream>
-#include <regex>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -26,7 +25,7 @@ bool Config::load(const std::string& path) {
         if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
             value = value.substr(1, value.size() - 2);
             m_data[key] = value;
-        } else if (value.front() == '[') {
+        } else if (value.size() >= 3 && value.front() == '[' && value.back() == ']') {
             std::string arrayContent = value.substr(1, value.size() - 2);
             std::stringstream ss(arrayContent);
             std::string item;
@@ -144,8 +143,6 @@ std::optional<std::string> Config::ttfSelector() const { return getString("ttf_s
 void Config::setTtfSelector(const std::string& v) { set("ttf_selector", v); }
 std::optional<int> Config::fontSize() const { return getInt("font_size"); }
 void Config::setFontSize(int v) { set("font_size", v); }
-std::optional<std::vector<std::string>> Config::fontMixList() const { return std::nullopt; /* 数组类型特殊处理 */ }
-void Config::setFontMixList(const std::vector<std::string>& v) { /* TODO */ }
 std::optional<int> Config::lineSpacing() const { return getInt("line_spacing"); }
 void Config::setLineSpacing(int v) { set("line_spacing", v); }
 std::optional<int> Config::charDistance() const { return getInt("char_distance"); }

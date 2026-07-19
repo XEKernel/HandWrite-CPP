@@ -49,13 +49,12 @@ CharacterOverrideDialog::CharacterOverrideDialog(QWidget *parent) : QDialog(pare
         connect(check, &QCheckBox::toggled, spin, &QWidget::setEnabled);
     };
     
-    QDoubleSpinBox *fs; QSpinBox *fs2;
     auto *fsLay = new QHBoxLayout(); m_fontSizeCheck = new QCheckBox(tr("覆盖"), this);
-    fs2 = new QSpinBox(this); fs2->setRange(1, 200); fs2->setValue(30); fs2->setEnabled(false);
-    fsLay->addWidget(m_fontSizeCheck); fsLay->addWidget(fs2); fsLay->addStretch();
+    m_fontSizeSpin = new QSpinBox(this);
+    m_fontSizeSpin->setRange(1, 200); m_fontSizeSpin->setValue(30); m_fontSizeSpin->setEnabled(false);
+    fsLay->addWidget(m_fontSizeCheck); fsLay->addWidget(m_fontSizeSpin); fsLay->addStretch();
     formLayout->addRow(tr("字体大小:"), fsLay);
-    connect(m_fontSizeCheck, &QCheckBox::toggled, fs2, &QSpinBox::setEnabled);
-    m_fontSizeSpin = reinterpret_cast<QSpinBox*>(fs2);
+    connect(m_fontSizeCheck, &QCheckBox::toggled, m_fontSizeSpin, &QSpinBox::setEnabled);
     
     mkLayout(m_perturbXCheck, m_perturbXSpin, tr("横向偏移:"), -100, 100, 0, 1);
     mkLayout(m_perturbYCheck, m_perturbYSpin, tr("纵向偏移:"), -100, 100, 0, 1);
@@ -126,6 +125,10 @@ MainWindow::MainWindow(QWidget *parent)
     fileMenu->addSeparator();
     fileMenu->addAction(tr("退出(&X)"), this, &MainWindow::close, QKeySequence::Quit);
     
+    auto* editMenu = menuBar()->addMenu(tr("编辑(&E)"));
+    editMenu->addAction(tr("撤销(&U)"), ui->textEditMain, &QTextEdit::undo, QKeySequence::Undo);
+    editMenu->addAction(tr("重做(&R)"), ui->textEditMain, &QTextEdit::redo, QKeySequence::Redo);
+    
     auto* presetMenu = menuBar()->addMenu(tr("预设(&P)"));
     presetMenu->addAction(tr("保存预设..."), this, &MainWindow::onPushButtonSaveConfigClicked, QKeySequence("Ctrl+Shift+S"));
     presetMenu->addAction(tr("加载预设..."), this, &MainWindow::onPushButtonLoadConfigClicked, QKeySequence("Ctrl+Shift+O"));
@@ -142,6 +145,8 @@ MainWindow::MainWindow(QWidget *parent)
     ui->imgPreview->setRenderHint(QPainter::SmoothPixmapTransform);
     ui->imgPreview->installEventFilter(this);
     ui->textEditMain->installEventFilter(this);
+    ui->textEditMain->setUndoRedoEnabled(true);
+    setAcceptDrops(true);
     
     setupConnections();
     
@@ -177,7 +182,6 @@ MainWindow::MainWindow(QWidget *parent)
     }
     
     connect(m_previewWatcher, &QFutureWatcher<std::vector<QImage>>::finished, this, &MainWindow::onPreviewFinished);
-    connect(m_exportWatcher, &QFutureWatcher<std::map<int,std::string>>::finished, this, &MainWindow::onExportFinished);
     connect(m_exportWatcher, &QFutureWatcher<std::map<int,std::string>>::finished, this, &MainWindow::onExportFinished);
     
     // 监听所有参数变化
@@ -273,6 +277,19 @@ void MainWindow::setupDynamicUi() {
     m_comboTextDirection = comboDir;
     dirLayout->addWidget(comboDir); dirLayout->addStretch();
     paraLayout->addLayout(dirLayout);
+    
+    // 文字变形模板
+    auto *warpLayout = new QHBoxLayout();
+    warpLayout->addWidget(new QLabel(tr("文字变形:"), paraGroup));
+    auto *comboWarp = new QComboBox(paraGroup);
+    comboWarp->addItem(tr("无"), 0);
+    comboWarp->addItem(tr("弧形"), 1);
+    comboWarp->addItem(tr("波浪"), 2);
+    comboWarp->addItem(tr("圆形"), 3);
+    connect(comboWarp, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onParameterChanged);
+    m_comboTextWarp = comboWarp;
+    warpLayout->addWidget(comboWarp); warpLayout->addStretch();
+    paraLayout->addLayout(warpLayout);
     
     // 笔触效果
     auto *effectGroup = new QGroupBox(tr("笔触效果"), scrollContent);
@@ -530,6 +547,7 @@ TemplateParams MainWindow::getParamsFromForm() {
     p.paragraphIndent=m_checkParagraphIndent->isChecked();
     p.paragraphSpacing=m_spinParagraphSpacing->value();
     p.textDirection = (m_comboTextDirection->currentIndex() == 1) ? TextDirection::Vertical : TextDirection::Horizontal;
+    p.textWarp = static_cast<TextWarp>(m_comboTextWarp->currentIndex());
     p.inkBleed=m_checkInkBleed->isChecked();
     p.inkBleedRadius=m_spinInkBleedRadius->value();
     p.strikeThroughRate=m_spinStrikeThroughRate->value();
@@ -1145,6 +1163,32 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     return QMainWindow::eventFilter(obj,event);
 }
 
+//=============================================================================
+// 拖放背景图片
+//=============================================================================
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    }
+}
+
+void MainWindow::dropEvent(QDropEvent* event) {
+    for (const QUrl& url : event->mimeData()->urls()) {
+        if (url.isLocalFile()) {
+            QString path = url.toLocalFile();
+            QImageReader reader(path);
+            if (reader.canRead()) {
+                m_bgImagePath = path;
+                m_bgCalibration.enabled = false;
+                m_labelBgImage->setText(QFileInfo(path).fileName());
+                onParameterChanged();
+                return;
+            }
+        }
+    }
+}
+
 void MainWindow::setupProgressDialog(const QString& title, int maximum) {
     if(m_progressDialog)delete m_progressDialog;
     m_progressDialog=new QProgressDialog(title,tr("取消"),0,maximum,this);
@@ -1189,7 +1233,7 @@ void MainWindow::showAboutDialog() {
     about.setIconPixmap(QPixmap(":/resources/app.ico").scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     about.setTextFormat(Qt::RichText);
     about.setText(QString(
-        "<h3>HandWrite Generator v2.4.4</h3>"
+        "<h3>HandWrite Generator v2.5.0</h3>"
         "<p>手写作业生成器 — 将电子文本渲染为模拟手写效果</p>"
         "<p>作者: <b>XEKernel</b></p>"
         "<p>代码仓库: <a href='https://github.com/XEKernel/HandWrite-CPP'>github.com/XEKernel/HandWrite-CPP</a></p>"

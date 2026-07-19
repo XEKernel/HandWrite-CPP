@@ -43,7 +43,6 @@ public:
     // 字体
     std::optional<std::string> ttfSelector() const; void setTtfSelector(const std::string& v);
     std::optional<int> fontSize() const; void setFontSize(int v);
-    std::optional<std::vector<std::string>> fontMixList() const; void setFontMixList(const std::vector<std::string>& v);
 
     // 排版
     std::optional<int> lineSpacing() const; void setLineSpacing(int v);

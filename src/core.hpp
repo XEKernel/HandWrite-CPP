@@ -68,7 +68,6 @@ struct StyledSpan {
     TextStyle style = TextStyle::Normal;
     QString text;           // 纯文本内容
     int fontSizeOverride = 0; // 0 表示使用默认
-    bool bold = false;
     bool strikethrough = false;
 };
 
@@ -79,6 +78,11 @@ struct StyledSpan {
 // 文字方向
 //=============================================================================
 enum class TextDirection { Horizontal, Vertical };
+
+//=============================================================================
+// 文字变形模板
+//=============================================================================
+enum class TextWarp { None, Arc, Wave, Circle };
 
 //=============================================================================
 // 背景图片网格校准（NxM 锚点，支持弯曲纸面）
@@ -136,6 +140,7 @@ struct TemplateParams {
     bool paragraphIndent = true;          // 段首缩进两字符
     int paragraphSpacing = 0;             // 段间距（额外行间距像素）
     TextDirection textDirection = TextDirection::Horizontal;  // 文字方向
+    TextWarp textWarp = TextWarp::None;                       // 文字变形模板
 
     // --- 扰动 ---
     double lineSpacingSigma = 1.0;
@@ -216,6 +221,9 @@ public:
     
     // PDF 导出
     bool exportPdf(const std::string& text, const std::string& pdfPath);
+    
+    // SVG 导出
+    bool exportSvg(const std::string& text, const std::string& svgPath);
 
     // 渲染和布局
     static QImage renderPageStatic(const PageRenderData& data);
@@ -253,8 +261,6 @@ private:
                                          int scaledWordSpacing = 0);
     bool isStartChar(QChar c) const;
     bool isEndChar(QChar c) const;
-    static bool isStartCharStatic(QChar c, const std::string& startChars);
-    static bool isEndCharStatic(QChar c, const std::string& endChars);
 
     // 纸张纹理绘制
     static void drawPaperTexture(QPainter& painter, int width, int height,

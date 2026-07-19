@@ -140,7 +140,8 @@ std::vector<std::string> BasicTools::getTtfFileNames() const {
             if (entry.is_regular_file()) {
                 std::string ext = entry.path().extension().string();
                 // 转换为小写进行比较
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
                 if (ext == ".ttf") {
                     std::string name = entry.path().stem().string();
                     names.push_back(name);
@@ -166,7 +167,8 @@ std::vector<std::string> BasicTools::getTtfFilePaths() const {
         for (const auto& entry : std::filesystem::directory_iterator(m_ttfLibraryPath)) {
             if (entry.is_regular_file()) {
                 std::string ext = entry.path().extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
                 if (ext == ".ttf") {
                     paths.push_back(entry.path().string());
                 }
@@ -202,7 +204,8 @@ std::pair<std::vector<std::string>, std::vector<std::string>> BasicTools::getTtf
         for (const auto& entry : std::filesystem::directory_iterator(m_ttfLibraryPath)) {
             if (entry.is_regular_file()) {
                 std::string ext = entry.path().extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
                 if (ext == ".ttf") {
                     names.push_back(entry.path().stem().string());
                     paths.push_back(entry.path().string());
