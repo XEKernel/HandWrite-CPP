@@ -40,7 +40,7 @@
 ### 依赖
 - MSYS2 (ucrt64)
 - GCC 16+
-- CMake 4+
+- CMake 3.16+
 - Qt 6.11+
 
 ### 安装依赖
@@ -80,7 +80,7 @@ cd G:\build\build_gcc
 handwrite-cli -t "文本内容" -o ./output -r 2
 
 # 从文件读取 + 预设配置
-handwrite-cli -i input.txt -p presets/语文作业.toml
+handwrite-cli -i input.txt -p presets/语文作业.conf
 
 # 导出 PDF
 handwrite-cli -t "内容" -f pdf -o ./output
@@ -95,7 +95,7 @@ echo "文本" | handwrite-cli -o ./out
 | `-t, --text` | 直接指定文本 |
 | `-i, --input` | 输入文件路径 |
 | `-o, --output` | 输出目录 (默认: outputs) |
-| `-p, --preset` | 预设配置文件 (.toml) |
+| `-p, --preset` | 预设配置文件 (.conf) |
 | `-r, --rate` | 分辨率倍率 (1/2/4/8/16/32/64) |
 | `-f, --format` | 输出格式 (png/pdf) |
 

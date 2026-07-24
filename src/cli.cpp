@@ -22,14 +22,14 @@ static void printUsage() {
   -i, --input <文件>       输入文本文件路径（如未指定则从stdin读取）
   -t, --text <文本>        直接指定文本内容
   -o, --output <目录>      输出目录（默认: outputs）
-  -p, --preset <预设>      预设配置文件（.toml）
+  -p, --preset <预设>      预设配置文件（.conf）
   -r, --rate <倍率>        输出分辨率倍率（1/2/4/8/16/32/64，默认4）
   -f, --format <格式>      输出格式: png 或 pdf（默认: png）
   -h, --help               显示此帮助
 
 示例:
   handwrite-cli -t "今天天气真好" -o ./output -r 2
-  handwrite-cli -i essay.txt -p presets/语文作业.toml -f pdf
+  handwrite-cli -i essay.txt -p presets/语文作业.conf -f pdf
   echo "测试文本" | handwrite-cli -o ./out
 )";
 }
@@ -49,7 +49,7 @@ static std::string readFile(const std::string& path) {
 int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("HandWrite CLI");
-    app.setApplicationVersion("2.5.0");
+    app.setApplicationVersion(HANDWRITE_VERSION);
     
     QCommandLineParser parser;
     parser.setApplicationDescription("手写作业生成器命令行工具");
@@ -141,7 +141,15 @@ int main(int argc, char* argv[]) {
         std::string line;
         int count = 0;
         while (std::getline(batchFile, line)) {
+            // 去除 Windows 换行符与首尾空白
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n'
+                                     || line.back() == ' ' || line.back() == '\t'))
+                line.pop_back();
+            while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+                line.erase(line.begin());
             if (line.empty()) continue;
+            std::ifstream test(line);
+            if (!test) { std::cerr << "警告: 跳过无法打开的文件: " << line << std::endl; continue; }
             std::string itemOutput = outputDir + "/" + std::to_string(count);
             auto result = generator.generateImageParallel(readFile(line), itemOutput);
             std::cout << "[" << count << "] " << line << " -> " << result.size() << " 页" << std::endl;

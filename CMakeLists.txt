@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(HandWrite VERSION 2.5.0 LANGUAGES CXX)
+project(HandWrite VERSION 2.5.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,8 +20,11 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 # Qt6 packages
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Concurrent PrintSupport Svg)
 
-# Include directories
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
+# WebP (optional CMake config, fallback to bare link)
+find_package(WebP QUIET)
+
+# Include directories - target-local
+set(INC_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Source files
 set(SOURCES
@@ -81,6 +84,8 @@ add_executable(${PROJECT_NAME}
     ${PLATFORM_RESOURCE}
 )
 
+target_include_directories(${PROJECT_NAME} PRIVATE ${INC_DIRS})
+
 # Link libraries
 target_link_libraries(${PROJECT_NAME}
     Qt6::Core
@@ -89,8 +94,13 @@ target_link_libraries(${PROJECT_NAME}
     Qt6::Concurrent
     Qt6::PrintSupport
     Qt6::Svg
-    webp
 )
+if(WebP_FOUND)
+    target_link_libraries(${PROJECT_NAME} WebP::webp)
+else()
+    target_link_libraries(${PROJECT_NAME} webp)
+endif()
+target_compile_definitions(${PROJECT_NAME} PRIVATE HANDWRITE_VERSION="${PROJECT_VERSION}")
 
 # Platform-specific executable properties
 if(WIN32)
@@ -155,14 +165,20 @@ set(CLI_SOURCES
     src/core.cpp
 )
 add_executable(handwrite-cli ${CLI_SOURCES})
+target_include_directories(handwrite-cli PRIVATE ${INC_DIRS})
 target_link_libraries(handwrite-cli
     Qt6::Core
     Qt6::Gui
     Qt6::Concurrent
     Qt6::PrintSupport
     Qt6::Svg
-    webp
 )
+if(WebP_FOUND)
+    target_link_libraries(handwrite-cli WebP::webp)
+else()
+    target_link_libraries(handwrite-cli webp)
+endif()
+target_compile_definitions(handwrite-cli PRIVATE HANDWRITE_VERSION="${PROJECT_VERSION}")
 if(WIN32)
     set_target_properties(handwrite-cli PROPERTIES WIN32_EXECUTABLE FALSE)
 endif()

@@ -13,6 +13,8 @@
 #include <set>
 #include <sstream>
 #include <QImageReader>
+#include <QMutex>
+#include <unordered_map>
 
 namespace HandWrite {
 
@@ -41,6 +43,19 @@ static QString convertChinesePunctuation(const QString& text) {
     result.replace(QChar(0x300A), QChar('<'));
     result.replace(QChar(0x300B), QChar('>'));
     return result;
+}
+
+// 仅清理本程序生成的页码 PNG（避免误删用户目录中的其他文件）
+static void cleanGeneratedPages(const QString& qDir) {
+    QDir dir(qDir);
+    if (!dir.exists()) return;
+    const QStringList entries = dir.entryList(QStringList() << "*.png", QDir::Files);
+    for (const QString& name : entries) {
+        QString base = name.left(name.lastIndexOf('.'));
+        bool ok = false;
+        base.toInt(&ok);
+        if (ok) dir.remove(name);
+    }
 }
 
 static CharacterOverride findCharOverride(int globalCharIndex, const std::vector<CharacterOverrideRange>& overrides) {
@@ -189,8 +204,8 @@ int HandwriteGenerator::gaussianRandomIntStatic(double sigma, std::mt19937& rng)
     return static_cast<int>(std::round(gaussianRandomStatic(sigma, rng)));
 }
 
-bool HandwriteGenerator::isStartChar(QChar c) const { return m_params.startChars.find(c.toLatin1()) != std::string::npos; }
-bool HandwriteGenerator::isEndChar(QChar c) const { return m_params.endChars.find(c.toLatin1()) != std::string::npos; }
+bool HandwriteGenerator::isStartChar(QChar c) const { return QString::fromStdString(m_params.startChars).contains(c); }
+bool HandwriteGenerator::isEndChar(QChar c) const { return QString::fromStdString(m_params.endChars).contains(c); }
 
 //=============================================================================
 // 纸张纹理绘制
@@ -281,6 +296,23 @@ void HandwriteGenerator::drawPaperTexture(QPainter& painter, int width, int heig
 // 字体混合选择
 //=============================================================================
 
+// 带缓存的字体注册：每个路径只调用 addApplicationFont 一次（线程安全）
+static QString getCachedFontFamily(const std::string& path) {
+    static std::unordered_map<std::string, QString> s_cache;
+    static QMutex s_mutex;
+    QMutexLocker lock(&s_mutex);
+    auto it = s_cache.find(path);
+    if (it != s_cache.end()) return it->second;
+    QString family;
+    int id = QFontDatabase::addApplicationFont(QString::fromStdString(path));
+    if (id != -1) {
+        QStringList fams = QFontDatabase::applicationFontFamilies(id);
+        if (!fams.isEmpty()) family = fams[0];
+    }
+    s_cache.emplace(path, family);
+    return family;
+}
+
 QFont HandwriteGenerator::pickMixedFont(const QFont& baseFont,
                                          const std::vector<std::string>& fontMixList) {
     if (fontMixList.empty()) return baseFont;
@@ -292,15 +324,11 @@ QFont HandwriteGenerator::pickMixedFont(const QFont& baseFont,
     if (mixDist(mixRng) > 0.2) return baseFont;
     
     int idx = static_cast<int>(mixDist(mixRng) * fontMixList.size()) % fontMixList.size();
-    QString path = QString::fromStdString(fontMixList[idx]);
-    int fontId = QFontDatabase::addApplicationFont(path);
-    if (fontId != -1) {
-        QStringList families = QFontDatabase::applicationFontFamilies(fontId);
-        if (!families.isEmpty()) {
-            QFont mixed(families[0]);
-            mixed.setPixelSize(baseFont.pixelSize());
-            return mixed;
-        }
+    QString family = getCachedFontFamily(fontMixList[idx]);
+    if (!family.isEmpty()) {
+        QFont mixed(family);
+        mixed.setPixelSize(baseFont.pixelSize());
+        return mixed;
     }
     return baseFont;
 }
@@ -311,39 +339,60 @@ QFont HandwriteGenerator::pickMixedFont(const QFont& baseFont,
 
 void HandwriteGenerator::applyInkBleed(QImage& image, double radius) {
     if (radius <= 0) return;
-    // 使用小范围模糊模拟墨水洇染
-    // 简化实现：对非透明像素周围添加半透明颜色
-    QImage src = image.copy();
     int r = static_cast<int>(std::ceil(radius));
-    
-    for (int y = r; y < image.height() - r; ++y) {
-        for (int x = r; x < image.width() - r; ++x) {
-            QRgb pixel = src.pixel(x, y);
-            if (qAlpha(pixel) == 0) {
-                // 检查周围是否有非透明像素
-                bool hasInk = false;
-                int rSum = 0, gSum = 0, bSum = 0, count = 0;
-                for (int dy = -r; dy <= r; ++dy) {
-                    for (int dx = -r; dx <= r; ++dx) {
-                        QRgb np = src.pixel(x + dx, y + dy);
-                        if (qAlpha(np) > 128) {
-                            hasInk = true;
-                            rSum += qRed(np);
-                            gSum += qGreen(np);
-                            bSum += qBlue(np);
-                            count++;
-                        }
-                    }
-                }
-                if (hasInk && count > 0) {
-                    int alpha = qMin(40, 255 / (r * 2));
-                    image.setPixel(x, y, qRgba(
-                        static_cast<int>(std::round(static_cast<double>(rSum)/count)),
-                        static_cast<int>(std::round(static_cast<double>(gSum)/count)),
-                        static_cast<int>(std::round(static_cast<double>(bSum)/count)), alpha));
-                }
-            }
+    if (r <= 0) return;
+    const int w = image.width(), h = image.height();
+    if (w <= 0 || h <= 0) return;
+
+    // 1) 统计不透明像素的平均墨色（仅一次 O(W*H) 遍历）
+    qulonglong ar = 0, ag = 0, ab = 0, ac = 0;
+    for (int y = 0; y < h; ++y) {
+        const unsigned char* s = image.constScanLine(y);
+        for (int x = 0; x < w; ++x)
+            if (s[x*4+3] > 128) { ar += s[x*4]; ag += s[x*4+1]; ab += s[x*4+2]; ++ac; }
+    }
+    if (ac == 0) return;
+    const int mr = static_cast<int>(ar / ac);
+    const int mg = static_cast<int>(ag / ac);
+    const int mb = static_cast<int>(ab / ac);
+
+    // 2) 可分离最大值滤波（膨胀）alpha 通道：O(W*H*r)，远优于原始 O(W*H*r^2)
+    QImage alphaBuf(w, h, QImage::Format_Alpha8);
+    std::vector<unsigned char> hbuf(static_cast<size_t>(w) * h, 0);
+    for (int y = 0; y < h; ++y) {
+        const unsigned char* s = image.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            unsigned char mx = s[x*4+3];
+            int lo = std::max(0, x - r);
+            int hi = std::min(w - 1, x + r);
+            for (int xx = lo; xx <= hi; ++xx)
+                mx = std::max(mx, s[xx*4+3]);
+            hbuf[static_cast<size_t>(y) * w + x] = mx;
         }
+    }
+    for (int x = 0; x < w; ++x) {
+        for (int y = 0; y < h; ++y) {
+            unsigned char mx = 0;
+            int lo = std::max(0, y - r);
+            int hi = std::min(h - 1, y + r);
+            for (int yy = lo; yy <= hi; ++yy)
+                mx = std::max(mx, hbuf[static_cast<size_t>(yy) * w + x]);
+            *(alphaBuf.scanLine(y) + x) = mx;
+        }
+    }
+
+    // 3) 为"原始透明、但邻居有墨"的像素填充淡墨色
+    const int bleedAlpha = qMin(40, 255 / (r * 2));
+    for (int y = 0; y < h; ++y) {
+        unsigned char* d = image.scanLine(y);
+        const unsigned char* a = alphaBuf.constScanLine(y);
+        for (int x = 0; x < w; ++x)
+            if (d[x*4+3] == 0 && a[x] > 128) {
+                d[x*4]   = static_cast<unsigned char>(mr);
+                d[x*4+1] = static_cast<unsigned char>(mg);
+                d[x*4+2] = static_cast<unsigned char>(mb);
+                d[x*4+3] = static_cast<unsigned char>(bleedAlpha);
+            }
     }
 }
 
@@ -384,7 +433,7 @@ std::vector<std::string> HandwriteGenerator::layoutText(const QString& text, con
             continue;
         }
         
-        QString converted = convertChinesePunctuation(span.text);
+        QString converted = m_params.preserveChinesePunctuation ? span.text : convertChinesePunctuation(span.text);
         hasFontOverride = span.fontSizeOverride > 0;
         if (hasFontOverride) {
             overrideFont = font;
@@ -798,11 +847,13 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
                 case TextWarp::Wave:
                     warpY += std::sin(phase * M_PI * 4 + lineIdx * 0.5) * (data.params.lineSpacing * data.params.rate) * 0.8;
                     break;
-                case TextWarp::Circle:
-                    warpY = contentTop + (data.params.lineSpacing * data.params.rate) * 2 + 
-                            std::sin((x - data.scaledWidth * 0.5) / data.scaledWidth * M_PI * 2) 
+                case TextWarp::Circle: {
+                    qreal ls = data.params.lineSpacing * data.params.rate;
+                    warpY = contentTop + ls * (lineIdx + 2) +
+                            std::sin((x - data.scaledWidth * 0.5) / data.scaledWidth * M_PI * 2)
                             * data.scaledHeight * 0.3;
                     break;
+                }
                 default: break;
             }
         }
@@ -894,17 +945,18 @@ std::vector<QImage> HandwriteGenerator::generatePreview(const std::string& text)
     images.reserve(pageDataList.size());
     for (const auto& pd : pageDataList) images.push_back(renderPageStatic(pd));
     
-    // 竖排：旋转每页
+    // 竖排：旋转每页后居中裁切
     if (m_params.textDirection == TextDirection::Vertical) {
         QTransform rot; rot.rotate(90);
+        int origW = m_params.paperWidth * m_params.rate;
+        int origH = m_params.paperHeight * m_params.rate;
         for (auto& img : images) {
             img = img.transformed(rot, Qt::SmoothTransformation);
-            // 裁剪到原始宽高
-            int origW = m_params.paperWidth * m_params.rate;
-            int origH = m_params.paperHeight * m_params.rate;
-            if (img.width() > origW || img.height() > origH) {
-                img = img.copy(QRect(0, 0, origW, origH));
-            }
+            int cw = qMin(img.width(),  origW);
+            int ch = qMin(img.height(), origH);
+            int cx = (img.width()  - cw) / 2;
+            int cy = (img.height() - ch) / 2;
+            img = img.copy(cx, cy, cw, ch);
         }
     }
     
@@ -922,12 +974,8 @@ std::map<int, std::string> HandwriteGenerator::generateImage(const std::string& 
     std::map<int, std::string> filePaths;
     QDir dir;
     QString qDir = QString::fromStdString(outputDir);
-    if (!dir.exists(qDir)) dir.mkpath(qDir);
-    // 安全检查：仅对非系统根目录执行递归删除
-    if (qDir != "/" && qDir != "C:/" && qDir != "D:/" && !qDir.endsWith(":/")) {
-        QDir(qDir).removeRecursively();
-    }
     dir.mkpath(qDir);
+    cleanGeneratedPages(qDir);
     
     auto images = generatePreview(text);
     for (size_t i = 0; i < images.size(); ++i) {
@@ -961,9 +1009,11 @@ std::vector<QImage> HandwriteGenerator::generatePreviewParallel(const std::strin
         int origH = m_params.paperHeight * m_params.rate;
         for (auto& img : images) {
             img = img.transformed(rot, Qt::SmoothTransformation);
-            if (img.width() > origW || img.height() > origH) {
-                img = img.copy(QRect(0, 0, origW, origH));
-            }
+            int cw = qMin(img.width(),  origW);
+            int ch = qMin(img.height(), origH);
+            int cx = (img.width()  - cw) / 2;
+            int cy = (img.height() - ch) / 2;
+            img = img.copy(cx, cy, cw, ch);
         }
     }
     
@@ -977,12 +1027,8 @@ std::map<int, std::string> HandwriteGenerator::generateImageParallel(const std::
     std::map<int, std::string> filePaths;
     QDir dir;
     QString qDir = QString::fromStdString(outputDir);
-    if (!dir.exists(qDir)) dir.mkpath(qDir);
-    // 安全检查：仅对非系统根目录执行递归删除
-    if (qDir != "/" && qDir != "C:/" && qDir != "D:/" && !qDir.endsWith(":/")) {
-        QDir(qDir).removeRecursively();
-    }
     dir.mkpath(qDir);
+    cleanGeneratedPages(qDir);
     
     if (threadCount <= 0) { threadCount = QThread::idealThreadCount(); if (threadCount <= 0) threadCount = 4; }
     
@@ -1118,36 +1164,36 @@ void HandwriteGenerator::warpMesh(QPainter& painter, const QImage& source,
     
     for (int r = 0; r < rows - 1; ++r) {
         for (int c = 0; c < cols - 1; ++c) {
-            // 获取源网格四角
             QPointF s00 = srcGrid[r * cols + c];
             QPointF s10 = srcGrid[r * cols + c + 1];
             QPointF s11 = srcGrid[(r + 1) * cols + c + 1];
             QPointF s01 = srcGrid[(r + 1) * cols + c];
             
-            // 目标网格四角
             QPointF d00 = dstGrid[r * cols + c];
             QPointF d10 = dstGrid[r * cols + c + 1];
             QPointF d11 = dstGrid[(r + 1) * cols + c + 1];
             QPointF d01 = dstGrid[(r + 1) * cols + c];
             
-            QPolygonF srcQuad;
-            srcQuad << s00 << s10 << s11 << s01;
-            QPolygonF dstQuad;
-            dstQuad << d00 << d10 << d11 << d01;
+            QPolygonF srcQuad; srcQuad << s00 << s10 << s11 << s01;
+            QPolygonF dstQuad; dstQuad << d00 << d10 << d11 << d01;
             
             QTransform warp;
-            QTransform::quadToQuad(srcQuad, dstQuad, warp);
+            if (!QTransform::quadToQuad(srcQuad, dstQuad, warp)) continue;
             
-            if (!warp.isIdentity()) {
-                // 裁剪到目标四边形区域
-                QPainterPath clip;
-                clip.addPolygon(dstQuad);
-                painter.save();
-                painter.setClipPath(clip);
-                painter.setTransform(warp);
-                painter.drawImage(0, 0, source);
-                painter.restore();
-            }
+            // 仅取该 cell 对应的源子矩形，避免每格重绘整图
+            qreal sx0 = std::min(s00.x(), s01.x());
+            qreal sx1 = std::max(s10.x(), s11.x());
+            qreal sy0 = std::min(s00.y(), s10.y());
+            qreal sy1 = std::max(s01.y(), s11.y());
+            QRectF srcCell(sx0, sy0, sx1 - sx0, sy1 - sy0);
+            srcCell = srcCell.intersected(QRectF(source.rect()));
+            
+            QPainterPath clip; clip.addPolygon(dstQuad);
+            painter.save();
+            painter.setClipPath(clip);
+            painter.setTransform(warp);
+            painter.drawImage(QPointF(0, 0), source, srcCell);
+            painter.restore();
         }
     }
 }

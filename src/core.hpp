@@ -158,9 +158,12 @@ struct TemplateParams {
     // --- 涂改模拟 ---
     double strikeThroughRate = 0.0;       // 划线删除概率 (0~1)
 
+    // --- 排版增强 ---
+    bool preserveChinesePunctuation = false;
+
     // --- 字符 ---
     std::string startChars = "\"（[<";
-    std::string endChars = "，。";
+    std::string endChars = "，。！？";
 
     // --- 颜色 ---
     Color fillColor = Color(0, 0, 0, 255);
