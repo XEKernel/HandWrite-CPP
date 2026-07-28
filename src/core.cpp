@@ -1192,7 +1192,7 @@ void HandwriteGenerator::warpMesh(QPainter& painter, const QImage& source,
             painter.save();
             painter.setClipPath(clip);
             painter.setTransform(warp);
-            painter.drawImage(QPointF(0, 0), source, srcCell);
+            painter.drawImage(srcCell.topLeft(), source, srcCell);
             painter.restore();
         }
     }
