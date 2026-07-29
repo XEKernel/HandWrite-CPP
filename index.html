@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HandWrite Generator · 开源手写字生成器</title>
+<meta name="description" content="使用 C++ 编写的手写字生成器，提供丰富的参数设置与 GUI/CLI 双模式，支持纸张纹理、墨水洇染、文字变形、锚点校准等特性。">
+<link rel="icon" href="image/app.ico">
+<style>
+  :root {
+    --bg: #0b1020;
+    --bg-2: #0f172a;
+    --surface: #111827;
+    --surface-2: #1f2937;
+    --border: #1f2a44;
+    --text: #e6edf7;
+    --text-dim: #94a3b8;
+    --muted: #64748b;
+    --primary: #6366f1;
+    --primary-2: #8b5cf6;
+    --accent: #f59e0b;
+    --ok: #10b981;
+    --shadow: 0 10px 40px -10px rgba(0,0,0,.6);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  a { color: inherit; text-decoration: none; }
+  .container { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11, 16, 32, 0.7);
+    backdrop-filter: saturate(180%) blur(12px);
+    -webkit-backdrop-filter: saturate(180%) blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 60px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .brand-mark { width: 28px; height: 28px; }
+  .nav-links { display: flex; gap: 24px; font-size: 14px; color: var(--text-dim); }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta { display: flex; gap: 8px; }
+
+  /* ---------- 按钮 ---------- */
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 500;
+    transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+    border: 1px solid transparent;
+    cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--primary), var(--primary-2));
+    color: white;
+    box-shadow: 0 4px 14px rgba(99, 102, 241, .35);
+  }
+  .btn-ghost {
+    background: transparent;
+    border-color: var(--border);
+    color: var(--text-dim);
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
+  .btn-sm { padding: 7px 14px; font-size: 13px; }
+
+  /* ---------- Hero ---------- */
+  .hero {
+    position: relative;
+    padding: 96px 0 80px;
+    background:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(99, 102, 241, .25), transparent),
+      radial-gradient(ellipse 60% 40% at 90% 30%, rgba(139, 92, 246, .15), transparent),
+      linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+    overflow: hidden;
+  }
+  .hero-inner {
+    display: grid; grid-template-columns: 1.1fr 1fr; gap: 60px; align-items: center;
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 999px;
+    background: rgba(99, 102, 241, .12);
+    border: 1px solid rgba(99, 102, 241, .3);
+    color: #a5b4fc; font-size: 13px; margin-bottom: 24px;
+  }
+  .badge::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--ok); box-shadow: 0 0 8px var(--ok);
+  }
+  h1.hero-title {
+    font-size: clamp(36px, 5.5vw, 56px); line-height: 1.15;
+    margin: 0 0 20px; font-weight: 700; letter-spacing: -.02em;
+  }
+  .hero-title .grad {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-2) 50%, var(--accent) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero-desc { color: var(--text-dim); font-size: 18px; max-width: 540px; margin-bottom: 32px; }
+  .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 40px; }
+  .hero-stats { display: flex; gap: 32px; flex-wrap: wrap; }
+  .stat strong {
+    display: block; font-size: 22px; font-weight: 600;
+    background: linear-gradient(135deg, var(--text), var(--text-dim));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .stat span { color: var(--muted); font-size: 13px; }
+
+  /* ---------- 预览卡 ---------- */
+  .preview-card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    transform: perspective(1000px) rotateY(-3deg) rotateX(2deg);
+    transition: transform .4s ease;
+  }
+  .preview-card:hover { transform: perspective(1000px) rotateY(0) rotateX(0); }
+  .preview-bar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .preview-bar .dot { width: 10px; height: 10px; border-radius: 50%; background: #374151; }
+  .preview-bar .dot.r { background: #ef4444; }
+  .preview-bar .dot.y { background: #f59e0b; }
+  .preview-bar .dot.g { background: #10b981; }
+  .preview-bar .title {
+    margin-left: 10px; font-size: 12px; color: var(--muted);
+    font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", monospace;
+  }
+  .preview-card img {
+    display: block; width: 100%; height: auto;
+    background: #fff;
+  }
+
+  /* ---------- 通用区段 ---------- */
+  section { padding: 80px 0; }
+  .section-head { text-align: center; max-width: 720px; margin: 0 auto 56px; }
+  .section-tag {
+    display: inline-block; padding: 4px 12px; border-radius: 999px;
+    background: rgba(99, 102, 241, .1); color: #a5b4fc;
+    font-size: 13px; margin-bottom: 16px;
+  }
+  h2.section-title { font-size: clamp(28px, 4vw, 40px); margin: 0 0 14px; letter-spacing: -.02em; }
+  .section-sub { color: var(--text-dim); font-size: 17px; margin: 0; }
+
+  /* ---------- 特性网格 ---------- */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .feature {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px;
+    transition: transform .2s ease, border-color .2s ease;
+  }
+  .feature:hover { transform: translateY(-4px); border-color: var(--primary); }
+  .feature-icon {
+    width: 42px; height: 42px; border-radius: 10px;
+    display: grid; place-items: center; font-size: 22px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, .15), rgba(139, 92, 246, .15));
+    border: 1px solid rgba(99, 102, 241, .25);
+    margin-bottom: 16px;
+  }
+  .feature h3 { font-size: 17px; margin: 0 0 8px; font-weight: 600; }
+  .feature p { color: var(--text-dim); font-size: 14px; margin: 0; line-height: 1.55; }
+
+  /* ---------- 工作流 ---------- */
+  .workflow { background: var(--bg-2); }
+  .steps {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; position: relative;
+  }
+  .step {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px; position: relative;
+  }
+  .step-num {
+    position: absolute; top: -14px; left: 24px;
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--primary), var(--primary-2));
+    color: white; display: grid; place-items: center;
+    font-weight: 600; font-size: 13px;
+  }
+  .step h3 { font-size: 16px; margin: 16px 0 8px; }
+  .step p { color: var(--text-dim); font-size: 14px; margin: 0; }
+
+  /* ---------- 代码块 ---------- */
+  .code-wrap {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+  }
+  .code-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; overflow: hidden;
+  }
+  .code-head {
+    padding: 12px 18px; background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 13px; color: var(--text-dim);
+  }
+  .code-head .lang { color: #a5b4fc; font-family: ui-monospace, monospace; }
+  pre {
+    margin: 0; padding: 20px; overflow-x: auto;
+    font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", monospace;
+    font-size: 13.5px; line-height: 1.65;
+    color: #cbd5e1;
+  }
+  pre .c { color: var(--muted); font-style: italic; }
+  pre .k { color: #c084fc; }
+  pre .s { color: #86efac; }
+  pre .n { color: #fbbf24; }
+  pre .o { color: #f472b6; }
+
+  /* ---------- 图片展示 ---------- */
+  .compare {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+    align-items: start;
+  }
+  .compare-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  .compare-card img {
+    display: block; width: 100%; height: auto;
+    background: #fff;
+  }
+  .compare-label {
+    padding: 12px 16px; font-size: 14px; font-weight: 600;
+    text-align: center;
+    background: linear-gradient(135deg, rgba(99, 102, 241, .12), rgba(139, 92, 246, .08));
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .compare-card:first-child .compare-label { color: #a5b4fc; }
+  .compare-card:last-child .compare-label { color: #6ee7b7; }
+
+  @media (max-width: 640px) { .compare { grid-template-columns: 1fr; } }
+
+  /* ---------- 下载 ---------- */
+  .download {
+    background: linear-gradient(135deg, rgba(99, 102, 241, .08), rgba(139, 92, 246, .05));
+    border: 1px solid var(--border); border-radius: 18px;
+    padding: 48px; text-align: center;
+  }
+  .download h3 { font-size: 28px; margin: 0 0 8px; }
+  .download p { color: var(--text-dim); margin: 0 0 28px; }
+  .download-buttons { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .version-tag {
+    display: inline-block; padding: 4px 12px; border-radius: 999px;
+    background: rgba(16, 185, 129, .12); color: var(--ok);
+    font-size: 13px; font-weight: 500; margin-bottom: 16px;
+  }
+
+  /* ---------- 页脚 ---------- */
+  footer {
+    border-top: 1px solid var(--border); padding: 40px 0;
+    color: var(--muted); font-size: 14px;
+  }
+  .foot {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;
+  }
+  .foot a:hover { color: var(--text-dim); }
+
+  /* ---------- 响应式 ---------- */
+  @media (max-width: 880px) {
+    .hero-inner { grid-template-columns: 1fr; gap: 40px; }
+    .preview-card { transform: none; }
+    .features { grid-template-columns: repeat(2, 1fr); }
+    .steps { grid-template-columns: repeat(2, 1fr); }
+    .code-wrap { grid-template-columns: 1fr; }
+    .tech-grid { grid-template-columns: repeat(3, 1fr); }
+    .nav-links { display: none; }
+  }
+  @media (max-width: 520px) {
+    .features { grid-template-columns: 1fr; }
+    .steps { grid-template-columns: 1fr; }
+    .tech-grid { grid-template-columns: repeat(2, 1fr); }
+    section { padding: 56px 0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container nav">
+    <div class="brand">
+      <img class="brand-mark" src="image/app.ico" alt="HandWrite icon">
+      <span>HandWrite</span>
+    </div>
+    <nav class="nav-links">
+      <a href="#features">特性</a>
+      <a href="#workflow">使用流程</a>
+      <a href="#cli">CLI</a>
+      <a href="#download">下载</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn btn-ghost btn-sm" href="https://github.com/XEKernel/HandWrite-CPP" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.18c-3.34.73-4.04-1.41-4.04-1.41-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.49 1 .11-.78.42-1.31.76-1.61-2.66-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23.96-.27 1.98-.4 3-.4s2.04.14 3 .4c2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.25 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.62-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58A12.01 12.01 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
+      <a class="btn btn-primary btn-sm" href="#download">下载 <span class="vre">v2.6.1</span></a>
+    </div>
+  </div>
+</header>
+
+<!-- ============== Hero ============== -->
+<section class="hero">
+  <div class="container hero-inner">
+    <div>
+      <span class="badge"><span class="vre">v2.6.1</span> · 开源 · 跨平台</span>
+      <h1 class="hero-title">
+        把文字变成<br>
+        <span class="grad">真实的手写字</span>
+      </h1>
+      <p class="hero-desc">
+        使用 C++ 编写的手写字生成器，提供丰富的参数设置与 GUI/CLI 双模式。
+        旨在让任何人都能快速生成以假乱真的手写作业。
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#download">
+          ⬇ 立即下载
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/XEKernel/HandWrite-CPP" target="_blank" rel="noopener">
+          查看源码
+        </a>
+      </div>
+      <div class="hero-stats">
+        <div class="stat"><strong>C++17</strong><span>高性能</span></div>
+        <div class="stat"><strong>Qt 6</strong><span>原生体验</span></div>
+        <div class="stat"><strong>3 格式</strong><span>PNG / PDF / SVG</span></div>
+        <div class="stat"><strong>GUI + CLI</strong><span>双模式</span></div>
+      </div>
+    </div>
+
+    <div class="preview-card">
+      <div class="preview-bar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="title">HandWrite Generator</span>
+      </div>
+      <img src="image/image.png" alt="HandWrite 软件主界面">
+    </div>
+  </div>
+</section>
+
+<!-- ============== 特性 ============== -->
+<section id="features">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">核心特性</span>
+      <h2 class="section-title">从一个字体到一张作业，所见即所得</h2>
+      <p class="section-sub">12+ 项参数随意组合，让每一次输出都更像真迹</p>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">🖋️</div>
+        <h3>多字体混合</h3>
+        <p>支持自定义 TTF 字库，可叠加多套字体模拟混写效果，自动随机切换增加真实感。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📄</div>
+        <h3>纸张纹理</h3>
+        <p>内置横线纸、田字格、方格纸、点阵纸等多种纸张模板，可自定义纹理透明度。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🎯</div>
+        <h3>锚点校准</h3>
+        <p>支持任意背景图片作为纸面，可拖拽网格锚点贴合弯曲纸面，生成透视变形效果。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">〰️</div>
+        <h3>字符扰动</h3>
+        <p>每个字符独立加入随机抖动 —— 大小、位置、旋转、气泡、抖动，模拟真实手写不规律。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">💧</div>
+        <h3>墨水洇染</h3>
+        <p>对笔划边缘应用可分离最大值滤波，模拟墨水在纸上轻微洇开的视觉效果。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📐</div>
+        <h3>文字变形</h3>
+        <p>弧形 / 波浪 / 环形三种文字变形模板，让长段落自然弯曲，避免过于规整。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">↔️</div>
+        <h3>横竖排切换</h3>
+        <p>支持横排 / 竖排两种排版方向，古文、诗词等场景一键切换。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🗑️</div>
+        <h3>涂改模拟</h3>
+        <p>可配置划线删除概率与笔划粗细抖动，让作业看起来真的"写过又改过"。</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📦</div>
+        <h3>批量处理</h3>
+        <p>CLI 提供批处理模式，从文件读取多段文本一次生成，自动跳过异常行。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== 输出效果 ============== -->
+<section style="background: var(--bg-2);">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">输出效果</span>
+      <h2 class="section-title">默认 A4 纸 vs 自定义背景 + 锚点</h2>
+      <p class="section-sub">同样的文字，从白纸到画报</p>
+    </div>
+    <div class="compare">
+      <div class="compare-card">
+        <img src="image/output1.png" alt="默认 A4 纸输出效果" loading="lazy">
+        <div class="compare-label">默认 A4 横线纸输出</div>
+      </div>
+      <div class="compare-card">
+        <img src="image/output2.png" alt="自定义背景图片 + 锚点校准输出" loading="lazy">
+        <div class="compare-label">自定义图片 + 锚点校准输出</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== 锚点校准 ============== -->
+<section>
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">锚点校准</span>
+      <h2 class="section-title">四角定位 + 精细微调，双模式自由切换</h2>
+      <p class="section-sub">让文字完美适配任意背景纸面</p>
+    </div>
+    <div class="compare">
+      <div class="compare-card">
+        <img src="image/%E5%9B%9B%E8%A7%92%E6%A8%A1%E5%BC%8F.png" alt="四角模式" loading="lazy">
+        <div class="compare-label">四角模式：仅拖动 4 个绿色角点，内部自动插值</div>
+      </div>
+      <div class="compare-card">
+        <img src="image/%E7%B2%BE%E7%BB%86%E8%B0%83%E6%95%B4.png" alt="精细调整模式" loading="lazy">
+        <div class="compare-label">精细调整：切换到全网格逐点微调</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== 使用流程 ============== -->
+<section id="workflow" class="workflow">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">使用流程</span>
+      <h2 class="section-title">四步完成一次生成</h2>
+      <p class="section-sub">从文本到纸张，无需复杂操作</p>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>选择字体</h3>
+        <p>从 ttf_library 加载喜欢的字体或自定义 TTF 文件。</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>调整参数</h3>
+        <p>纸张、字号、扰动、纹理、墨水等参数自由组合。</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>预览效果</h3>
+        <p>实时预览渲染结果，反复微调直到满意。</p>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <h3>导出文件</h3>
+        <p>一键导出为 PNG、PDF 或 SVG 格式。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== CLI ============== -->
+<section id="cli">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-tag">命令行</span>
+      <h2 class="section-title">GUI 之外，CLI 更直接</h2>
+      <p class="section-sub">适合批处理、脚本自动化、远程服务器</p>
+    </div>
+
+    <div class="code-wrap">
+      <div class="code-card">
+        <div class="code-head"><span>基本用法</span><span class="lang">bash</span></div>
+<pre><span class="c"># 从命令行参数生成 PNG</span>
+handwrite-cli \
+  <span class="k">-t</span> <span class="s">"今天天气真好。"</span> \
+  <span class="k">-o</span> <span class="s">"F:/out"</span> \
+  <span class="k">-f</span> png \
+  <span class="k">-r</span> 2
+
+<span class="c"># 输出 PDF / SVG</span>
+handwrite-cli <span class="k">-t</span> <span class="s">"..."</span> <span class="k">-o</span> out <span class="k">-f</span> pdf</pre>
+      </div>
+
+      <div class="code-card">
+        <div class="code-head"><span>批量与预设</span><span class="lang">bash</span></div>
+<pre><span class="c"># 加载预设参数（字体、扰动、纹理等）</span>
+handwrite-cli <span class="k">-i</span> essay.txt <span class="k">-p</span> my.conf
+
+<span class="c"># 从文件读取待生成文本列表</span>
+<span class="c"># batch.txt: 每行一个文本，自动产出 0.png 1.png ...</span>
+handwrite-cli <span class="k">--batch</span> batch.txt
+
+<span class="c"># 支持从剪贴板读取</span>
+handwrite-cli <span class="k">--clipboard</span> <span class="k">-o</span> out</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== 下载 ============== -->
+<section id="download">
+  <div class="container">
+    <div class="download">
+      <span class="version-tag">最新版本 <span class="vre">v2.6.1</span></span>
+      <h3>立即开始生成你的手写作业</h3>
+      <p>Windows 64-bit · 解压即用 · 包含 Qt 运行时与字体库</p>
+      <div class="download-buttons">
+        <a class="btn btn-primary" href="https://github.com/XEKernel/HandWrite-CPP/releases/latest" target="_blank" rel="noopener">
+          ⬇ 下载 <span class="vre">v2.6.1</span> (Windows x64)
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/XEKernel/HandWrite-CPP" target="_blank" rel="noopener">
+          源代码仓库
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/XEKernel/HandWrite-CPP/issues" target="_blank" rel="noopener">
+          反馈问题
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container foot">
+    <div>© 2026 HandWrite Generator · MIT License</div>
+    <div style="display:flex;gap:18px;">
+      <a href="https://github.com/XEKernel/HandWrite-CPP" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/XEKernel/HandWrite-CPP/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/XEKernel/HandWrite-CPP/issues" target="_blank" rel="noopener">Issues</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// 实时拉取 GitHub 最新 Release 版本号
+fetch('https://api.github.com/repos/XEKernel/HandWrite-CPP/releases/latest')
+  .then(r => r.json())
+  .then(data => {
+    const v = data.tag_name;
+    document.querySelectorAll('.vre').forEach(el => { el.textContent = v; });
+  })
+  .catch(() => {});
+</script>
+</body>
+</html>
