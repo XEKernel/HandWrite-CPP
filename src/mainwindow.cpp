@@ -927,12 +927,12 @@ void MainWindow::onComboBoxPaperTemplateCurrentIndexChanged(int) {
 }
 
 //=============================================================================
-// CalibrationDialog 实现 — 网格形变
+// CalibrationDialog 实现 — 四角锚点 + 精细网格
 //=============================================================================
 
 CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent)
     : QDialog(parent), m_rows(3), m_cols(3) {
-    setWindowTitle(tr("网格校准 — 拖拽锚点适应纸面弯曲"));
+    setWindowTitle(tr("网格校准 — 拖拽四角锚点适配纸面"));
     
     // 使用统一加载器（含 WebP 回退）
     m_image = loadImageWithWebpFallback(imagePath.toStdString());
@@ -946,16 +946,17 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     int btnBarHeight = 75;
     setFixedSize(m_scaledPixmap.width() + 20, m_scaledPixmap.height() + btnBarHeight);
     
-    // 恢复已有校准
+    // 恢复已有校准 或 默认四角模式
     if (calib.enabled && calib.isValid()) {
         m_rows = calib.rows;
         m_cols = calib.cols;
         m_points = calib.gridPoints;
+        m_cornerMode = false;  // 已有完整网格 → 精细模式
     } else {
-        buildUniformGrid();
+        applyMode(true);  // 默认四角模式
     }
     
-    // 底部按钮栏
+    // ── 底部按钮栏 ──
     int btnY = m_scaledPixmap.height() + 8;
     int bw = 28, bh = 28, gap = 5;
     
@@ -966,43 +967,125 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
         return b;
     };
     
-    auto* btnColPlus = makeBtn("+", gap);
-    auto* btnColMinus = makeBtn("-", gap + bw + gap);
-    auto* lblCol = new QLabel(this);
-    lblCol->setText(QString("列:%1").arg(m_cols));
-    lblCol->setGeometry(gap + (bw+gap)*2, btnY, 50, bh);
-    lblCol->setStyleSheet("color: white;");
+    // 模式切换按钮（始终可见）
+    m_modeBtn = new QPushButton(tr("精细调整 ↗"), this);
+    m_modeBtn->setGeometry(gap, btnY, 100, bh);
+    m_modeBtn->setFont(QFont("", 9));
+    m_modeBtn->setStyleSheet("QPushButton { color: #5af; border: 1px solid #5af; border-radius: 4px; padding: 2px 6px; }"
+                             "QPushButton:hover { background: rgba(80,170,255,.15); }");
+    if (!m_cornerMode) m_modeBtn->setText(tr("四角模式 ↙"));
     
-    auto* btnRowPlus = makeBtn("+", gap + (bw+gap)*2 + 55);
-    auto* btnRowMinus = makeBtn("-", gap + (bw+gap)*3 + 55);
-    auto* lblRow = new QLabel(this);
-    lblRow->setText(QString("行:%1").arg(m_rows));
-    lblRow->setGeometry(gap + (bw+gap)*4 + 55, btnY, 50, bh);
-    lblRow->setStyleSheet("color: white;");
+    connect(m_modeBtn, &QPushButton::clicked, this, [this]() {
+        if (m_cornerMode) {
+            // 四角 → 精细：初始 3×3，内部点由四角插值
+            applyMode(false, 3, 3);
+            m_lblCol->setText(QString("列:%1").arg(m_cols));
+            m_lblRow->setText(QString("行:%1").arg(m_rows));
+            m_modeBtn->setText(tr("四角模式 ↙"));
+            m_btnColP->show(); m_btnColM->show(); m_lblCol->show();
+            m_btnRowP->show(); m_btnRowM->show(); m_lblRow->show();
+            m_btnReset->show();
+        } else {
+            // 精细 → 四角：保留四角，缩为 2×2
+            applyMode(true);
+            m_modeBtn->setText(tr("精细调整 ↗"));
+            m_btnColP->hide(); m_btnColM->hide(); m_lblCol->hide();
+            m_btnRowP->hide(); m_btnRowM->hide(); m_lblRow->hide();
+            m_btnReset->hide();
+        }
+        update();
+    });
     
-    auto* btnReset = new QPushButton(tr("重置"), this);
-    btnReset->setGeometry(gap + (bw+gap)*4 + 115, btnY, 50, bh);
+    int x = gap + 108;
+    
+    m_btnColP = makeBtn("+", x); x += bw + gap;
+    m_btnColM = makeBtn("-", x); x += bw + gap;
+    m_lblCol = new QLabel(this);
+    m_lblCol->setText(QString("列:%1").arg(m_cols));
+    m_lblCol->setGeometry(x, btnY, 50, bh);
+    m_lblCol->setStyleSheet("color: white;");
+    x += 55;
+    
+    m_btnRowP = makeBtn("+", x); x += bw + gap;
+    m_btnRowM = makeBtn("-", x); x += bw + gap;
+    m_lblRow = new QLabel(this);
+    m_lblRow->setText(QString("行:%1").arg(m_rows));
+    m_lblRow->setGeometry(x, btnY, 50, bh);
+    m_lblRow->setStyleSheet("color: white;");
+    x += 55;
+    
+    m_btnReset = new QPushButton(tr("重置"), this);
+    m_btnReset->setGeometry(x, btnY, 50, bh);
     
     auto* btnOk = new QPushButton(tr("确定"), this);
     btnOk->setGeometry(width() - 90, btnY, 70, bh);
     btnOk->setDefault(true);
     
-    connect(btnColPlus, &QPushButton::clicked, this, [this, lblCol]() {
-        if (m_cols < 5) { m_cols++; buildUniformGrid(); lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+    // ── 连接 ──
+    connect(m_btnColP, &QPushButton::clicked, this, [this]() {
+        if (!m_cornerMode && m_cols < 5) { m_cols++; buildUniformGrid(); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
     });
-    connect(btnColMinus, &QPushButton::clicked, this, [this, lblCol]() {
-        if (m_cols > 2) { m_cols--; buildUniformGrid(); lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+    connect(m_btnColM, &QPushButton::clicked, this, [this]() {
+        if (!m_cornerMode && m_cols > 2) { m_cols--; buildUniformGrid(); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
     });
-    connect(btnRowPlus, &QPushButton::clicked, this, [this, lblRow]() {
-        if (m_rows < 5) { m_rows++; buildUniformGrid(); lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+    connect(m_btnRowP, &QPushButton::clicked, this, [this]() {
+        if (!m_cornerMode && m_rows < 5) { m_rows++; buildUniformGrid(); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
     });
-    connect(btnRowMinus, &QPushButton::clicked, this, [this, lblRow]() {
-        if (m_rows > 2) { m_rows--; buildUniformGrid(); lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+    connect(m_btnRowM, &QPushButton::clicked, this, [this]() {
+        if (!m_cornerMode && m_rows > 2) { m_rows--; buildUniformGrid(); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
     });
-    connect(btnReset, &QPushButton::clicked, this, [this]() { buildUniformGrid(); update(); });
+    connect(m_btnReset, &QPushButton::clicked, this, [this]() {
+        if (m_cornerMode) { applyMode(true); }
+        else { buildUniformGrid(); }
+        update();
+    });
     connect(btnOk, &QPushButton::clicked, this, &QDialog::accept);
     
+    // 初始显示状态
+    if (m_cornerMode) {
+        m_btnColP->hide(); m_btnColM->hide(); m_lblCol->hide();
+        m_btnRowP->hide(); m_btnRowM->hide(); m_lblRow->hide();
+        m_btnReset->hide();
+    }
+    
     setMouseTracking(true);
+}
+
+void CalibrationDialog::applyMode(bool cornerMode, int newRows, int newCols) {
+    if (cornerMode) {
+        // 如果当前是精细模式，从当前网格提取四角
+        std::vector<QPointF> corners(4);
+        if (!m_cornerMode && !m_points.empty()) {
+            corners[0] = m_points[0];                           // TL
+            corners[1] = m_points[m_cols - 1];                  // TR
+            corners[2] = m_points[(m_rows - 1) * m_cols];       // BL
+            corners[3] = m_points[m_rows * m_cols - 1];         // BR
+        } else {
+            // 默认：图片四角
+            corners[0] = QPointF(0, 0);
+            corners[1] = QPointF(m_image.width(), 0);
+            corners[2] = QPointF(0, m_image.height());
+            corners[3] = QPointF(m_image.width(), m_image.height());
+        }
+        m_rows = 2; m_cols = 2;
+        m_cornerMode = true;
+        m_points = corners;
+    } else {
+        m_rows = newRows; m_cols = newCols;
+        m_cornerMode = false;
+        // 从四角双线性插值出内部点
+        QPointF tl = m_points[0], tr = m_points[1], bl = m_points[2], br = m_points[3];
+        m_points.resize(m_rows * m_cols);
+        for (int r = 0; r < m_rows; ++r) {
+            qreal v = (m_rows > 1) ? static_cast<qreal>(r) / (m_rows - 1) : 0;
+            for (int c = 0; c < m_cols; ++c) {
+                qreal u = (m_cols > 1) ? static_cast<qreal>(c) / (m_cols - 1) : 0;
+                qreal x = (1 - v) * ((1 - u) * tl.x() + u * tr.x()) + v * ((1 - u) * bl.x() + u * br.x());
+                qreal y = (1 - v) * ((1 - u) * tl.y() + u * tr.y()) + v * ((1 - u) * bl.y() + u * br.y());
+                m_points[r * m_cols + c] = QPointF(x, y);
+            }
+        }
+    }
 }
 
 void CalibrationDialog::buildUniformGrid() {
@@ -1019,9 +1102,25 @@ void CalibrationDialog::buildUniformGrid() {
 BackgroundCalibration CalibrationDialog::getCalibration() const {
     BackgroundCalibration c;
     c.enabled = true;
-    c.rows = m_rows;
-    c.cols = m_cols;
-    c.gridPoints = m_points;
+    if (m_cornerMode) {
+        // 四角模式：输出 3×3 插值网格
+        c.rows = 3; c.cols = 3;
+        c.gridPoints.resize(9);
+        QPointF tl = m_points[0], tr = m_points[1], bl = m_points[2], br = m_points[3];
+        for (int r = 0; r < 3; ++r) {
+            qreal v = r / 2.0;
+            for (int col = 0; col < 3; ++col) {
+                qreal u = col / 2.0;
+                qreal x = (1 - v) * ((1 - u) * tl.x() + u * tr.x()) + v * ((1 - u) * bl.x() + u * br.x());
+                qreal y = (1 - v) * ((1 - u) * tl.y() + u * tr.y()) + v * ((1 - u) * bl.y() + u * br.y());
+                c.gridPoints[r * 3 + col] = QPointF(x, y);
+            }
+        }
+    } else {
+        c.rows = m_rows;
+        c.cols = m_cols;
+        c.gridPoints = m_points;
+    }
     return c;
 }
 
@@ -1043,37 +1142,97 @@ void CalibrationDialog::paintEvent(QPaintEvent*) {
     p.fillRect(rect(), QColor(40, 40, 40));
     p.drawPixmap(0, 0, m_scaledPixmap);
     
-    // 网格线
-    QPen gridPen(QColor(0, 160, 255, 120), 1);
-    p.setPen(gridPen);
-    for (int r = 0; r < m_rows; ++r) {
-        for (int c = 0; c < m_cols - 1; ++c) {
-            p.drawLine(toWidgetCoords(m_points[r * m_cols + c]),
-                       toWidgetCoords(m_points[r * m_cols + c + 1]));
+    if (m_cornerMode) {
+        // ── 四角模式：只画四角大锚点和轮廓线 ──
+        QPen outlinePen(QColor(0, 200, 100, 180), 2, Qt::DashLine);
+        p.setPen(outlinePen);
+        // 四条边: 0=TL 1=TR 2=BL 3=BR
+        p.drawLine(toWidgetCoords(m_points[0]), toWidgetCoords(m_points[1])); // 上
+        p.drawLine(toWidgetCoords(m_points[1]), toWidgetCoords(m_points[3])); // 右
+        p.drawLine(toWidgetCoords(m_points[2]), toWidgetCoords(m_points[3])); // 下
+        p.drawLine(toWidgetCoords(m_points[0]), toWidgetCoords(m_points[2])); // 左
+        
+        // 预览内插线（用淡色画一些插值网格线，帮助预览效果）
+        QPointF corners[4] = {m_points[0], m_points[1], m_points[2], m_points[3]};
+        QPen previewPen(QColor(0, 200, 100, 50), 1, Qt::DotLine);
+        p.setPen(previewPen);
+        int previewRows = 3, previewCols = 3;
+        for (int r = 0; r < previewRows; ++r) {
+            for (int c = 0; c < previewCols - 1; ++c) {
+                qreal v = r / (previewRows - 1.0);
+                qreal ua = c / (previewCols - 1.0);
+                qreal ub = (c + 1) / (previewCols - 1.0);
+                auto interp = [&](qreal u, qreal vv) -> QPointF {
+                    return QPointF(
+                        (1 - vv) * ((1 - u) * corners[0].x() + u * corners[1].x()) + vv * ((1 - u) * corners[2].x() + u * corners[3].x()),
+                        (1 - vv) * ((1 - u) * corners[0].y() + u * corners[1].y()) + vv * ((1 - u) * corners[2].y() + u * corners[3].y())
+                    );
+                };
+                p.drawLine(toWidgetCoords(interp(ua, v)), toWidgetCoords(interp(ub, v)));
+            }
         }
-    }
-    for (int r = 0; r < m_rows - 1; ++r) {
-        for (int c = 0; c < m_cols; ++c) {
-            p.drawLine(toWidgetCoords(m_points[r * m_cols + c]),
-                       toWidgetCoords(m_points[(r + 1) * m_cols + c]));
+        for (int r = 0; r < previewRows - 1; ++r) {
+            for (int c = 0; c < previewCols; ++c) {
+                qreal va = r / (previewRows - 1.0);
+                qreal vb = (r + 1) / (previewRows - 1.0);
+                qreal u = c / (previewCols - 1.0);
+                auto interp = [&](qreal uu, qreal vv) -> QPointF {
+                    return QPointF(
+                        (1 - vv) * ((1 - uu) * corners[0].x() + uu * corners[1].x()) + vv * ((1 - uu) * corners[2].x() + uu * corners[3].x()),
+                        (1 - vv) * ((1 - uu) * corners[0].y() + uu * corners[1].y()) + vv * ((1 - uu) * corners[2].y() + uu * corners[3].y())
+                    );
+                };
+                p.drawLine(toWidgetCoords(interp(u, va)), toWidgetCoords(interp(u, vb)));
+            }
         }
-    }
-    
-    // 网格点
-    for (int i = 0; i < m_rows * m_cols; ++i) {
-        QPoint wp = toWidgetCoords(m_points[i]);
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0, 160, 255));
-        p.drawEllipse(wp, 5, 5);
-        p.setBrush(Qt::white);
-        p.drawEllipse(wp, 2, 2);
+        
+        // 四个大锚点
+        for (int i = 0; i < 4; ++i) {
+            QPoint wp = toWidgetCoords(m_points[i]);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0, 200, 100));
+            p.drawEllipse(wp, 7, 7);
+            p.setBrush(Qt::white);
+            p.drawEllipse(wp, 3, 3);
+        }
+    } else {
+        // ── 精细模式：完整网格 ──
+        QPen gridPen(QColor(0, 160, 255, 120), 1);
+        p.setPen(gridPen);
+        for (int r = 0; r < m_rows; ++r) {
+            for (int c = 0; c < m_cols - 1; ++c) {
+                p.drawLine(toWidgetCoords(m_points[r * m_cols + c]),
+                           toWidgetCoords(m_points[r * m_cols + c + 1]));
+            }
+        }
+        for (int r = 0; r < m_rows - 1; ++r) {
+            for (int c = 0; c < m_cols; ++c) {
+                p.drawLine(toWidgetCoords(m_points[r * m_cols + c]),
+                           toWidgetCoords(m_points[(r + 1) * m_cols + c]));
+            }
+        }
+        
+        // 网格点（四角用绿色高亮）
+        for (int i = 0; i < m_rows * m_cols; ++i) {
+            int r = i / m_cols, c = i % m_cols;
+            bool isCorner = (r == 0 || r == m_rows - 1) && (c == 0 || c == m_cols - 1);
+            QPoint wp = toWidgetCoords(m_points[i]);
+            p.setPen(Qt::NoPen);
+            p.setBrush(isCorner ? QColor(0, 200, 100) : QColor(0, 160, 255));
+            p.drawEllipse(wp, 5, 5);
+            p.setBrush(Qt::white);
+            p.drawEllipse(wp, 2, 2);
+        }
     }
     
     // 提示
     p.setPen(QColor(200, 200, 200));
     p.setFont(QFont("Microsoft YaHei", 9));
     int h = m_scaledPixmap.height();
-    p.drawText(5, h + 40, tr("拖拽蓝色锚点适应纸面弯曲 | %1×%2 网格 | 点击确定").arg(m_rows).arg(m_cols));
+    QString tip = m_cornerMode
+        ? tr("拖拽绿色四角锚点适配纸面 | 点「精细调整」微调内部")
+        : tr("拖拽蓝色锚点微调 | 绿色=四角 | %1×%2 网格").arg(m_rows).arg(m_cols);
+    p.drawText(5, h + 40, tip);
 }
 
 void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
@@ -1082,7 +1241,13 @@ void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
     if (pos.y() > m_scaledPixmap.height()) return;  // 忽略按钮区
     
     m_dragIdx = -1;
-    for (int i = 0; i < m_rows * m_cols; ++i) {
+    int total = m_rows * m_cols;
+    for (int i = 0; i < total; ++i) {
+        // 四角模式下只允许拖拽 4 个角
+        if (m_cornerMode) {
+            // 角点索引: 0(TL), 1(TR), 2(BL), 3(BR)
+            if (i != 0 && i != 1 && i != 2 && i != 3) continue;
+        }
         QPoint wp = toWidgetCoords(m_points[i]);
         if ((pos - wp).manhattanLength() < 14) {
             m_dragIdx = i;

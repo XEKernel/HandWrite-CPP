@@ -75,12 +75,17 @@ private:
     QPointF toImageCoords(const QPoint& widgetPos) const;
     QPoint toWidgetCoords(const QPointF& imgPos) const;
     void buildUniformGrid();
-    
+    void applyMode(bool cornerMode, int newRows = 3, int newCols = 3);
+
     QImage m_image;
     QPixmap m_scaledPixmap;
     int m_rows, m_cols;
     std::vector<QPointF> m_points;  // 行主序，图片坐标
     int m_dragIdx = -1;
+    bool m_cornerMode = true;
+    QPushButton *m_modeBtn = nullptr;
+    QPushButton *m_btnColP = nullptr, *m_btnColM = nullptr, *m_btnRowP = nullptr, *m_btnRowM = nullptr, *m_btnReset = nullptr;
+    QLabel *m_lblCol = nullptr, *m_lblRow = nullptr;
 };
 
 class MainWindow : public QMainWindow {
