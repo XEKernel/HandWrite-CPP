@@ -1023,16 +1023,16 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     
     // ── 连接 ──
     connect(m_btnColP, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_cols < 5) { m_cols++; buildUniformGrid(); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+        if (!m_cornerMode && m_cols < 5) { applyMode(false, m_rows, m_cols + 1); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
     });
     connect(m_btnColM, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_cols > 2) { m_cols--; buildUniformGrid(); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+        if (!m_cornerMode && m_cols > 2) { applyMode(false, m_rows, m_cols - 1); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
     });
     connect(m_btnRowP, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_rows < 5) { m_rows++; buildUniformGrid(); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+        if (!m_cornerMode && m_rows < 5) { applyMode(false, m_rows + 1, m_cols); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
     });
     connect(m_btnRowM, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_rows > 2) { m_rows--; buildUniformGrid(); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+        if (!m_cornerMode && m_rows > 2) { applyMode(false, m_rows - 1, m_cols); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
     });
     connect(m_btnReset, &QPushButton::clicked, this, [this]() {
         if (m_cornerMode) { applyMode(true); }
@@ -1071,10 +1071,14 @@ void CalibrationDialog::applyMode(bool cornerMode, int newRows, int newCols) {
         m_cornerMode = true;
         m_points = corners;
     } else {
+        int oldRows = m_rows, oldCols = m_cols;
         m_rows = newRows; m_cols = newCols;
         m_cornerMode = false;
-        // 从四角双线性插值出内部点
-        QPointF tl = m_points[0], tr = m_points[1], bl = m_points[2], br = m_points[3];
+        // 从四角双线性插值出内部点（用旧网格坐标取角，兼容 2×2 和 N×M）
+        QPointF tl = m_points[0];
+        QPointF tr = m_points[oldCols - 1];
+        QPointF bl = m_points[(oldRows - 1) * oldCols];
+        QPointF br = m_points[oldRows * oldCols - 1];
         m_points.resize(m_rows * m_cols);
         for (int r = 0; r < m_rows; ++r) {
             qreal v = (m_rows > 1) ? static_cast<qreal>(r) / (m_rows - 1) : 0;

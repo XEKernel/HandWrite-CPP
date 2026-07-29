@@ -1,7 +1,7 @@
 # HandWrite-CPP 项目记忆
 
 ## 版本号规范
-- 格式: `主版本.功能添加.小修复`（当前 2.5.1）
+- 格式: `主版本.功能添加.小修复`（当前 2.6.1）
 - **BUG 修复** → 第三位 +1；**功能添加** → 第二位 +1；第二位满 10 进 1 → 第一位 +1
 - **版本已单源化**：只在 `CMakeLists.txt` 的 `project(VERSION x.y.z)` 改一处，通过 `HANDWRITE_VERSION` 宏注入 `main.cpp`/`cli.cpp`；`mainwindow.cpp` 用 `QApplication::applicationVersion()`；`build.yml` 用 `${{ github.ref_name }}`。不再手工同步 6 处。
 
