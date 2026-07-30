@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: Sync website to XEKernel.github.io
 
 on:
   push:
@@ -7,20 +7,19 @@ on:
       - 'Web/**'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  deploy:
+  sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy to gh-pages
+      - name: Deploy to XEKernel.github.io/projects/handwrite/
         uses: peaceiris/actions-gh-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          deploy_key: ${{ secrets.SITE_DEPLOY_KEY }}
+          external_repository: XEKernel/XEKernel.github.io
           publish_dir: Web
-          publish_branch: gh-pages
-          force_orphan: true
+          destination_dir: projects/handwrite
+          publish_branch: main
+          keep_files: true
