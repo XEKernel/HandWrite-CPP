@@ -22,18 +22,31 @@
 - **墨水洇染** — 笔迹边缘羽化效果
 - **涂改模拟** — 随机划线删除
 
+### 字体
+- **手写字体库** — 把 `.ttf` 放进 `ttf_library/` 目录，程序启动时自动加载
+- **混合字体** — 可指定若干附加字体与出现概率，按字符随机切换，模拟同一页里笔迹不一致的效果
+  （GUI「混合字体...」按钮；配合随机种子可复现）
+
 ### 排版增强
 - 段首缩进两字符
 - 段间距独立设置
+- 中文标点保留/转 ASCII 开关（默认保留）
+- 中文避头尾（禁则）：标点不会孤悬行首
+- 竖排、文字变形（弧形/波浪/环形）+ 变形强度
 - Markdown 轻标记：`# 标题`、`~~删除线~~`、`---` 分割线
+
+### 复现
+- **随机种子** — 设置种子后预览与导出结果逐字节一致；留空则每次随机
+  GUI 有「种子」输入框与「随机」按钮，CLI 用 `-s/--seed`
 
 ### UI 功能
 - 实时自动预览（参数变化 500ms 后刷新）
 - **可拖拽分隔条** — 预览区和设置栏宽度自由调节
-- PDF 导出
-- 多预设管理（保存/加载/删除）
+- PNG / PDF / **SVG（多页）** 导出
+- 多预设管理（保存/加载/删除），预设存于 `QStandardPaths::AppDataLocation/presets`
 - 字符级别属性覆盖
 - 缩放、翻页、打印
+- 长任务进度对话框**可取消**
 
 ## 构建
 
@@ -58,6 +71,16 @@ cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja
 ```
 
+### 跑测试
+单元测试目标 `handwrite-tests` 默认随主工程一起构建（不在 Windows 时同样可用）：
+```bash
+cd build
+ctest --output-on-failure
+# 或直接跑
+QT_QPA_PLATFORM=offscreen ./handwrite-tests
+```
+关闭测试：`cmake .. -DHANDWRITE_BUILD_TESTS=OFF`。
+代码格式化：仓库根目录已提供 `.clang-format`（`clang-format -i src/*.cpp src/*.hpp tests/*.cpp`）。
 ## 使用
 
 ### GUI
@@ -82,8 +105,15 @@ handwrite-cli -t "文本内容" -o ./output -r 2
 # 从文件读取 + 预设配置
 handwrite-cli -i input.txt -p presets/语文作业.conf
 
-# 导出 PDF
+# 导出 PDF / SVG（SVG 多页为 output.svg、output-2.svg …）
 handwrite-cli -t "内容" -f pdf -o ./output
+handwrite-cli -t "内容" -f svg -o ./output
+
+# 固定随机种子，结果可复现
+handwrite-cli -i essay.txt -o ./out -s 20260912
+
+# 批量处理（每行一个输入文件）
+handwrite-cli -b list.txt -o ./out
 
 # 管道输入
 echo "文本" | handwrite-cli -o ./out
@@ -97,13 +127,32 @@ echo "文本" | handwrite-cli -o ./out
 | `-o, --output` | 输出目录 (默认: outputs) |
 | `-p, --preset` | 预设配置文件 (.conf) |
 | `-r, --rate` | 分辨率倍率 (1/2/4/8/16/32/64) |
-| `-f, --format` | 输出格式 (png/pdf) |
+| `-f, --format` | 输出格式 (png/pdf/svg) |
+| `-s, --seed` | 固定随机种子（同种子结果可复现）；批量模式下按序号递增 |
+| `-b, --batch` | 批量处理：每行一个输入文件路径的列表文件 |
+| `-h, --help` | 显示帮助 |
 
-## 字体
-
-将 `.ttf` 手写字体文件放入 `ttf_library/` 目录，程序启动时自动加载。
+> 预设文件是 `key = value` 格式（**.conf**），不是 TOML；旧的 `.toml` 预设仍可读、仍会列出。
+> `-p` 会读取预设里的全部字段（纸张纹理、混合字体、排版方向、变形、标点策略、
+> 背景锚点校准、字符级覆盖、种子等），与 GUI 保存的内容一致。
 
 ## 变更记录
+
+Release 说明由 [`CHANGELOG.md`](CHANGELOG.md) 自动生成：打 tag 推送后，Actions 会截取其中
+对应版本的段落作为 GitHub Release 正文。**改代码时请顺手更新该文件。**
+
+### v2.7.0
+详见 [`CHANGELOG.md`](CHANGELOG.md) 的 2.7.0 小节，以及完整静态审查报告
+[`docs/CODE_REVIEW_2026-09-12.md`](docs/CODE_REVIEW_2026-09-12.md)。要点：
+
+- **修复**：GUI 导出不再清空 `outputs/`（数据安全）；x32/x64 高倍率不再必然 OOM，
+  改为给出可读的内存预算提示；工作线程不再访问 UI；背景图只解码一次并跨页共享
+- **修复**：预设里所有小数被 `std::stoi` 静默截断成整数（`0.35` → `0`）；
+  预设保存/加载丢失 8 类参数；Markdown 删除线不闭合；字符覆盖索引错位
+- **新增**：SVG 多页导出、随机种子复现、混合字体真正可用、中文标点保留开关、
+  逐字变形、中文避头尾、长任务可取消、CLI `-f svg` / `-s/--seed`
+- **工程**：`handwrite-tests` 单测（88 项断言）+ `ctest`、`.clang-format`、`-Wall -Wextra` 零告警、
+  发布包只拷真正依赖的 DLL（30 个，替代原来整包 256MB）
 
 ### v2.6.1
 - **锚点校准优化**：修复四角↔精细模式切换时角点复位 bug（行列按钮改用插值、角点提取用网格坐标）

@@ -3,8 +3,62 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <iomanip>
+#include <limits>
 
 namespace HandWrite {
+
+namespace {
+
+std::string trimCopy(const std::string& str) {
+    const size_t start = str.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    return str.substr(start, str.find_last_not_of(" \t\r\n") - start + 1);
+}
+
+// 写文件时转义双引号与反斜杠
+// 注意：注释行末不能出现反斜杠，否则会把下一行代码吞进注释（-Wcomment）
+std::string escapeString(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\\')      out += "\\\\";
+        else if (c == '"')  out += "\\\"";
+        else                out += c;
+    }
+    return out;
+}
+
+std::string unescapeString(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            const char n = s[++i];
+            out += (n == 'n') ? '\n' : n;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// 按 ',' 切分，忽略引号内的逗号
+// （字符级覆盖的 CSV 编码本身含逗号，朴素切分会把它切碎）
+std::vector<std::string> splitListItems(const std::string& content) {
+    std::vector<std::string> items;
+    std::string cur;
+    bool inQuotes = false;
+    for (char ch : content) {
+        if (ch == '"') { inQuotes = !inQuotes; cur += ch; continue; }
+        if (ch == ',' && !inQuotes) { items.push_back(trimCopy(cur)); cur.clear(); continue; }
+        cur += ch;
+    }
+    items.push_back(trimCopy(cur));
+    return items;
+}
+
+} // namespace
 
 Config::Config(const std::string& path) { load(path); }
 
@@ -18,41 +72,78 @@ bool Config::load(const std::string& path) {
     while (std::getline(file, line)) {
         line = trim(line);
         if (line.empty() || line[0] == '#') continue;
-        size_t eqPos = line.find('=');
+        const size_t eqPos = line.find('=');
         if (eqPos == std::string::npos) continue;
-        std::string key = trim(line.substr(0, eqPos));
-        std::string value = trim(line.substr(eqPos + 1));
+        const std::string key = trim(line.substr(0, eqPos));
+        const std::string value = trim(line.substr(eqPos + 1));
+        if (key.empty()) continue;
+
+        // 带引号的字符串
         if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-            value = value.substr(1, value.size() - 2);
-            m_data[key] = value;
-        } else if (value.size() >= 3 && value.front() == '[' && value.back() == ']') {
-            std::string arrayContent = value.substr(1, value.size() - 2);
-            std::stringstream ss(arrayContent);
-            std::string item;
+            m_data[key] = unescapeString(value.substr(1, value.size() - 2));
+            continue;
+        }
+
+        // 数组：可能是 int[]、double[] 或 string[]
+        if (value.size() >= 2 && value.front() == '[' && value.back() == ']') {
+            const std::vector<std::string> items = splitListItems(value.substr(1, value.size() - 2));
             std::vector<int> intArray;
             std::vector<double> doubleArray;
-            bool isDouble = false;
-            while (std::getline(ss, item, ',')) {
-                item = trim(item);
-                if (item.empty()) continue;
+            std::vector<std::string> stringArray;
+            bool anyDouble = false, anyString = false;
+            for (const std::string& raw : items) {
+                if (raw.empty()) continue;
+                if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+                    anyString = true;
+                    stringArray.push_back(unescapeString(raw.substr(1, raw.size() - 2)));
+                    continue;
+                }
                 try {
-                    if (item.find('.') != std::string::npos) {
-                        isDouble = true;
-                        doubleArray.push_back(std::stod(item));
-                    } else {
-                        intArray.push_back(std::stoi(item));
-                    }
-                } catch (const std::exception&) { continue; }
+                    const double d = std::stod(raw);
+                    if (raw.find('.') != std::string::npos ||
+                        raw.find('e') != std::string::npos ||
+                        raw.find('E') != std::string::npos) anyDouble = true;
+                    // 两种都存，最后由 anyDouble 决定用哪个：
+                    // 旧实现遇到混合数组（[1, 2.5]）会把已解析的整数整批丢掉
+                    doubleArray.push_back(d);
+                    intArray.push_back(static_cast<int>(d));
+                } catch (const std::exception&) {
+                    anyString = true;
+                    stringArray.push_back(raw);
+                }
             }
-            m_data[key] = isDouble ? Value(doubleArray) : Value(intArray);
-        } else if (value == "true" || value == "false") {
-            m_data[key] = (value == "true") ? 1 : 0;
-        } else if (value.find('.') != std::string::npos) {
-            m_data[key] = std::stod(value);
-        } else {
-            try { m_data[key] = std::stoi(value); }
-            catch (...) { m_data[key] = value; }
+            if (anyString)      m_data[key] = stringArray;
+            else if (anyDouble) m_data[key] = doubleArray;
+            else                m_data[key] = intArray;
+            continue;
         }
+
+        if (value == "true" || value == "false") {
+            m_data[key] = (value == "true") ? 1 : 0;
+            continue;
+        }
+
+        // 数字：必须「整串被消费」才算数字。
+        // 旧实现直接用 std::stoi("0.35")：它只解析前导 "0" 就返回 0，且不抛异常，
+        // 于是预设里所有小数（font_mix_rate=0.35、texture_opacity=0.3、
+        // perturb_theta_sigma=0.05 …）在保存/加载往返中被静默截断成整数。
+        {
+            bool parsed = false;
+            try {
+                size_t pos = 0;
+                const int iv = std::stoi(value, &pos);
+                if (pos == value.size()) { m_data[key] = iv; parsed = true; }
+            } catch (const std::exception&) {}
+            if (!parsed) {
+                try {
+                    size_t pos = 0;
+                    const double dv = std::stod(value, &pos);
+                    if (pos == value.size()) { m_data[key] = dv; parsed = true; }
+                } catch (const std::exception&) {}
+            }
+            if (parsed) continue;
+        }
+        m_data[key] = value;
     }
     return true;
 }
@@ -75,10 +166,14 @@ std::string Config::trim(const std::string& str) const {
 std::string Config::valueToString(const Value& value) const {
     if (std::holds_alternative<int>(value)) return std::to_string(std::get<int>(value));
     if (std::holds_alternative<double>(value)) {
-        std::ostringstream oss; oss << std::get<double>(value); return oss.str();
+        // precision 15：既能让 0.35 保持写成 "0.35"（默认格式会去掉尾随零），
+        // 又能保证绝大多数小数往返不丢精度
+        std::ostringstream oss;
+        oss << std::setprecision(15) << std::get<double>(value);
+        return oss.str();
     }
     if (std::holds_alternative<std::string>(value))
-        return "\"" + std::get<std::string>(value) + "\"";
+        return "\"" + escapeString(std::get<std::string>(value)) + "\"";
     if (std::holds_alternative<std::vector<int>>(value)) {
         const auto& a = std::get<std::vector<int>>(value);
         std::string r = "["; for (size_t i = 0; i < a.size(); ++i)
@@ -87,7 +182,12 @@ std::string Config::valueToString(const Value& value) const {
     if (std::holds_alternative<std::vector<double>>(value)) {
         const auto& a = std::get<std::vector<double>>(value);
         std::string r = "["; for (size_t i = 0; i < a.size(); ++i)
-        { std::ostringstream oss; oss << a[i]; r += oss.str(); if (i < a.size()-1) r += ", "; } r += "]"; return r;
+        { std::ostringstream oss; oss << std::setprecision(15) << a[i]; r += oss.str(); if (i < a.size()-1) r += ", "; } r += "]"; return r;
+    }
+    if (std::holds_alternative<std::vector<std::string>>(value)) {
+        const auto& a = std::get<std::vector<std::string>>(value);
+        std::string r = "["; for (size_t i = 0; i < a.size(); ++i)
+        { r += "\"" + escapeString(a[i]) + "\""; if (i < a.size()-1) r += ", "; } r += "]"; return r;
     }
     return "";
 }
@@ -120,12 +220,19 @@ std::optional<std::vector<double>> Config::getDoubleArray(const std::string& key
     if (it != m_data.end() && std::holds_alternative<std::vector<double>>(it->second)) return std::get<std::vector<double>>(it->second);
     return std::nullopt;
 }
+std::optional<std::vector<std::string>> Config::getStringArray(const std::string& key) const {
+    auto it = m_data.find(key);
+    if (it != m_data.end() && std::holds_alternative<std::vector<std::string>>(it->second))
+        return std::get<std::vector<std::string>>(it->second);
+    return std::nullopt;
+}
 
 void Config::set(const std::string& key, int v) { m_data[key] = v; }
 void Config::set(const std::string& key, double v) { m_data[key] = v; }
 void Config::set(const std::string& key, const std::string& v) { m_data[key] = v; }
 void Config::set(const std::string& key, const std::vector<int>& v) { m_data[key] = v; }
 void Config::set(const std::string& key, const std::vector<double>& v) { m_data[key] = v; }
+void Config::set(const std::string& key, const std::vector<std::string>& v) { m_data[key] = v; }
 bool Config::has(const std::string& key) const { return m_data.find(key) != m_data.end(); }
 
 // ---- Property accessors ----
@@ -187,5 +294,57 @@ std::optional<double> Config::inkBleedRadius() const { return getDouble("ink_ble
 void Config::setInkBleedRadius(double v) { set("ink_bleed_radius", v); }
 std::optional<double> Config::strikeThroughRate() const { return getDouble("strikethrough_rate"); }
 void Config::setStrikeThroughRate(double v) { set("strikethrough_rate", v); }
+
+// ---- 新增：排版方向 / 变形 / 标点 ----
+std::optional<int> Config::textDirection() const { return getInt("text_direction"); }
+void Config::setTextDirection(int v) { set("text_direction", v); }
+std::optional<int> Config::textWarp() const { return getInt("text_warp"); }
+void Config::setTextWarp(int v) { set("text_warp", v); }
+std::optional<double> Config::textWarpStrength() const { return getDouble("text_warp_strength"); }
+void Config::setTextWarpStrength(double v) { set("text_warp_strength", v); }
+std::optional<bool> Config::preserveChinesePunctuation() const {
+    auto v = getInt("preserve_chinese_punctuation");
+    return v.has_value() ? std::optional<bool>(*v != 0) : std::nullopt; }
+void Config::setPreserveChinesePunctuation(bool v) { set("preserve_chinese_punctuation", v ? 1 : 0); }
+
+// ---- 新增：混合字体 ----
+std::optional<std::vector<std::string>> Config::fontMixList() const { return getStringArray("font_mix_list"); }
+void Config::setFontMixList(const std::vector<std::string>& v) { set("font_mix_list", v); }
+std::optional<double> Config::fontMixRate() const { return getDouble("font_mix_rate"); }
+void Config::setFontMixRate(double v) { set("font_mix_rate", v); }
+
+// ---- 新增：背景图片锚点校准 ----
+std::optional<bool> Config::bgCalibEnabled() const {
+    auto v = getInt("bg_calib_enabled");
+    return v.has_value() ? std::optional<bool>(*v != 0) : std::nullopt; }
+void Config::setBgCalibEnabled(bool v) { set("bg_calib_enabled", v ? 1 : 0); }
+std::optional<int> Config::bgCalibRows() const { return getInt("bg_calib_rows"); }
+void Config::setBgCalibRows(int v) { set("bg_calib_rows", v); }
+std::optional<int> Config::bgCalibCols() const { return getInt("bg_calib_cols"); }
+void Config::setBgCalibCols(int v) { set("bg_calib_cols", v); }
+std::optional<std::vector<double>> Config::bgCalibPoints() const { return getDoubleArray("bg_calib_points"); }
+void Config::setBgCalibPoints(const std::vector<double>& v) { set("bg_calib_points", v); }
+
+// ---- 新增：字符级覆盖 ----
+std::optional<std::vector<std::string>> Config::charOverrides() const { return getStringArray("char_overrides"); }
+void Config::setCharOverrides(const std::vector<std::string>& v) { set("char_overrides", v); }
+
+// ---- 新增：复现种子 ----
+std::optional<unsigned int> Config::seed() const {
+    auto it = m_data.find("seed");
+    if (it == m_data.end()) return std::nullopt;
+    if (std::holds_alternative<int>(it->second))
+        return static_cast<unsigned int>(std::get<int>(it->second));
+    if (std::holds_alternative<double>(it->second))
+        return static_cast<unsigned int>(std::get<double>(it->second));
+    return std::nullopt;
+}
+void Config::setSeed(unsigned int v) {
+    // 存为 int（GUI 生成的种子限制在 int 正区间内），超范围时退回 double
+    if (v <= static_cast<unsigned int>(std::numeric_limits<int>::max()))
+        set("seed", static_cast<int>(v));
+    else
+        set("seed", static_cast<double>(v));
+}
 
 } // namespace HandWrite

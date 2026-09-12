@@ -1,11 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
-project(HandWrite VERSION 2.6.1 LANGUAGES CXX)
+project(HandWrite VERSION 2.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
+
+# 单测默认随主工程一起构建（CI 上会执行 ctest）
+option(HANDWRITE_BUILD_TESTS "Build unit tests" ON)
+# 严格告警：能挡掉一整类「能编译但行为错」的问题
+option(HANDWRITE_STRICT_WARNINGS "Enable -Wall -Wextra" ON)
 
 # Platform-specific settings
 if(WIN32)
@@ -181,4 +186,57 @@ endif()
 target_compile_definitions(handwrite-cli PRIVATE HANDWRITE_VERSION="${PROJECT_VERSION}")
 if(WIN32)
     set_target_properties(handwrite-cli PROPERTIES WIN32_EXECUTABLE FALSE)
+endif()
+
+#=============================================================================
+# 严格告警（所有目标共用）
+#=============================================================================
+if(HANDWRITE_STRICT_WARNINGS)
+    if(MSVC)
+        set(HANDWRITE_WARN_FLAGS /W4)
+    else()
+        set(HANDWRITE_WARN_FLAGS -Wall -Wextra)
+    endif()
+    foreach(_tgt ${PROJECT_NAME} handwrite-cli)
+        target_compile_options(${_tgt} PRIVATE ${HANDWRITE_WARN_FLAGS})
+    endforeach()
+endif()
+
+#=============================================================================
+# 单元测试
+#=============================================================================
+if(HANDWRITE_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(handwrite-tests
+        tests/test_core.cpp
+        src/config.cpp
+        src/tools.cpp
+        src/core.cpp
+    )
+    target_include_directories(handwrite-tests PRIVATE ${INC_DIRS})
+    target_link_libraries(handwrite-tests
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Concurrent
+        Qt6::PrintSupport
+        Qt6::Svg
+    )
+    if(WebP_FOUND)
+        target_link_libraries(handwrite-tests WebP::webp)
+    else()
+        target_link_libraries(handwrite-tests webp)
+    endif()
+    target_compile_definitions(handwrite-tests PRIVATE HANDWRITE_VERSION="${PROJECT_VERSION}")
+
+    if(HANDWRITE_STRICT_WARNINGS)
+        target_compile_options(handwrite-tests PRIVATE ${HANDWRITE_WARN_FLAGS})
+    endif()
+
+    # 测试二进制自己决定平台插件（有 offscreen 就用，否则交给 Qt 默认平台），
+    # 这里只保证工作目录是构建目录
+    add_test(NAME handwrite-unit COMMAND handwrite-tests)
+    set_tests_properties(handwrite-unit PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    )
 endif()

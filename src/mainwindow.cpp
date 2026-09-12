@@ -28,8 +28,24 @@
 #include <QGridLayout>
 #include <QInputDialog>
 #include <QFileInfo>
+#include <QStandardPaths>
+#include <QRegularExpression>
+#include <QRandomGenerator>
+#include <QResizeEvent>
+#include <algorithm>
+#include <sstream>
+#include <optional>
 
 namespace HandWrite {
+
+namespace {
+
+// 生成 1..2e9 范围内的随机种子（留在 int 正区间内，便于以整数写入配置）
+unsigned int makeRandomSeed() {
+    return static_cast<unsigned int>(QRandomGenerator::global()->bounded(1, 2000000000));
+}
+
+} // namespace
 
 //=============================================================================
 // CharacterOverrideDialog
@@ -113,29 +129,33 @@ CharacterOverride CharacterOverrideDialog::getOverride() const {
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), m_scene(new QGraphicsScene(this)),
-      m_pixmapItem(nullptr), m_previewWatcher(new QFutureWatcher<std::vector<QImage>>(this)),
-      m_exportWatcher(new QFutureWatcher<std::map<int,std::string>>(this)), m_progressDialog(nullptr) {
+      m_pixmapItem(nullptr), m_previewWatcher(new QFutureWatcher<RenderOutcome>(this)),
+      m_exportWatcher(new QFutureWatcher<ExportOutcome>(this)), m_progressDialog(nullptr),
+      m_cancelFlag(std::make_shared<std::atomic<bool>>(false)) {
     ui->setupUi(this);
     
     // 菜单栏
     auto* fileMenu = menuBar()->addMenu(tr("文件(&F)"));
     auto* actNew = fileMenu->addAction(tr("新建(&N)"), this, &MainWindow::onMenuFileNew);
     actNew->setShortcut(QKeySequence::New);
-    fileMenu->addAction(tr("打开文本(&O)..."), this, &MainWindow::onMenuFileOpen, QKeySequence::Open);
-    fileMenu->addAction(tr("保存文本(&S)"), this, &MainWindow::onMenuFileSave, QKeySequence::Save);
+    // 注意：Qt 6 推荐 addAction(text, shortcut, object, slot) 的参数顺序，
+    // 旧的 addAction(text, object, slot, shortcut) 已标记废弃（-Wdeprecated）
+    fileMenu->addAction(tr("打开文本(&O)..."), QKeySequence::Open, this, &MainWindow::onMenuFileOpen);
+    fileMenu->addAction(tr("保存文本(&S)"), QKeySequence::Save, this, &MainWindow::onMenuFileSave);
     fileMenu->addSeparator();
-    fileMenu->addAction(tr("退出(&X)"), this, &MainWindow::close, QKeySequence::Quit);
+    fileMenu->addAction(tr("退出(&X)"), QKeySequence::Quit, this, &MainWindow::close);
     
     auto* editMenu = menuBar()->addMenu(tr("编辑(&E)"));
-    editMenu->addAction(tr("撤销(&U)"), ui->textEditMain, &QTextEdit::undo, QKeySequence::Undo);
-    editMenu->addAction(tr("重做(&R)"), ui->textEditMain, &QTextEdit::redo, QKeySequence::Redo);
+    editMenu->addAction(tr("撤销(&U)"), QKeySequence::Undo, ui->textEditMain, &QTextEdit::undo);
+    editMenu->addAction(tr("重做(&R)"), QKeySequence::Redo, ui->textEditMain, &QTextEdit::redo);
     
-    auto* presetMenu = menuBar()->addMenu(tr("预设(&P)"));
-    presetMenu->addAction(tr("保存预设..."), this, &MainWindow::onPushButtonSaveConfigClicked, QKeySequence("Ctrl+Shift+S"));
-    presetMenu->addAction(tr("加载预设..."), this, &MainWindow::onPushButtonLoadConfigClicked, QKeySequence("Ctrl+Shift+O"));
+    auto* presetMenu = menuBar()->addMenu(tr("导出(&P)"));
+    presetMenu->addAction(tr("导出 PNG..."), QKeySequence("Ctrl+E"), this, &MainWindow::onPushButtonExportClicked);
+    presetMenu->addAction(tr("导出 PDF..."), QKeySequence("Ctrl+P"), this, &MainWindow::onPushButtonExportPdfClicked);
+    presetMenu->addAction(tr("导出 SVG..."), this, &MainWindow::onPushButtonExportSvgClicked);
     presetMenu->addSeparator();
-    presetMenu->addAction(tr("导出 PNG..."), this, &MainWindow::onPushButtonExportClicked, QKeySequence("Ctrl+E"));
-    presetMenu->addAction(tr("导出 PDF..."), this, &MainWindow::onPushButtonExportPdfClicked, QKeySequence("Ctrl+P"));
+    presetMenu->addAction(tr("保存预设..."), QKeySequence("Ctrl+Shift+S"), this, &MainWindow::onPushButtonSaveConfigClicked);
+    presetMenu->addAction(tr("加载预设..."), QKeySequence("Ctrl+Shift+O"), this, &MainWindow::onPushButtonLoadConfigClicked);
     
     auto* helpMenu = menuBar()->addMenu(tr("帮助(&H)"));
     helpMenu->addAction(tr("关于(&A)"), this, &MainWindow::showAboutDialog);
@@ -182,8 +202,8 @@ MainWindow::MainWindow(QWidget *parent)
         mainLayout->addWidget(splitter);
     }
     
-    connect(m_previewWatcher, &QFutureWatcher<std::vector<QImage>>::finished, this, &MainWindow::onPreviewFinished);
-    connect(m_exportWatcher, &QFutureWatcher<std::map<int,std::string>>::finished, this, &MainWindow::onExportFinished);
+    connect(m_previewWatcher, &QFutureWatcher<RenderOutcome>::finished, this, &MainWindow::onPreviewFinished);
+    connect(m_exportWatcher, &QFutureWatcher<ExportOutcome>::finished, this, &MainWindow::onExportFinished);
     
     // 监听所有参数变化
     auto watchLineEdit = [this](QLineEdit* e){ connect(e,&QLineEdit::textChanged,this,&MainWindow::onParameterChanged); };
@@ -292,6 +312,28 @@ void MainWindow::setupDynamicUi() {
     warpLayout->addWidget(comboWarp); warpLayout->addStretch();
     paraLayout->addLayout(warpLayout);
     
+    // 变形强度
+    auto *wsLayout = new QHBoxLayout();
+    wsLayout->addWidget(new QLabel(tr("变形强度:"), paraGroup));
+    m_spinTextWarpStrength = new QDoubleSpinBox(paraGroup);
+    m_spinTextWarpStrength->setRange(0.0, 3.0);
+    m_spinTextWarpStrength->setSingleStep(0.1);
+    m_spinTextWarpStrength->setDecimals(1);
+    m_spinTextWarpStrength->setValue(1.0);
+    connect(m_spinTextWarpStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &MainWindow::onParameterChanged);
+    wsLayout->addWidget(m_spinTextWarpStrength); wsLayout->addStretch();
+    paraLayout->addLayout(wsLayout);
+    
+    // 中文标点开关（此前该参数存在但从未在界面上暴露，
+    // 导致 。，！？ 等标点被静默替换成 ASCII 等价字符）
+    m_checkPreservePunct = new QCheckBox(tr("保留中文标点（。，！？）"), paraGroup);
+    m_checkPreservePunct->setChecked(true);
+    m_checkPreservePunct->setToolTip(tr("关闭后中文标点会替换为 . , ! ? 等 ASCII 字符，"
+                                        "适合字库里没有中文标点的字体"));
+    connect(m_checkPreservePunct, &QCheckBox::toggled, this, &MainWindow::onParameterChanged);
+    paraLayout->addWidget(m_checkPreservePunct);
+    
     // 笔触效果
     auto *effectGroup = new QGroupBox(tr("笔触效果"), scrollContent);
     auto *effectLayout = new QVBoxLayout(effectGroup);
@@ -328,6 +370,50 @@ void MainWindow::setupDynamicUi() {
     swLayout->addWidget(m_spinStrokeWidthSigma); swLayout->addStretch();
     effectLayout->addLayout(swLayout);
     
+    // ── 混合字体 ──
+    // 此前 fontMixList 从未被任何代码填充，README 宣称的「混合字体」实际是死功能
+    if (auto *fontGroup = scrollContent->findChild<QGroupBox*>("groupBoxFont")) {
+        if (auto *fl = qobject_cast<QGridLayout*>(fontGroup->layout())) {
+            const int row = fl->rowCount();
+            auto *mixBtn = new QPushButton(tr("选择…"), fontGroup);
+            connect(mixBtn, &QPushButton::clicked, this, &MainWindow::onPushButtonFontMixClicked);
+            m_labelFontMix = new QLabel(tr("未启用"), fontGroup);
+            m_labelFontMix->setWordWrap(true);
+            auto *mixRow = new QHBoxLayout();
+            mixRow->addWidget(mixBtn);
+            mixRow->addWidget(m_labelFontMix, 1);
+            fl->addWidget(new QLabel(tr("混合字体:"), fontGroup), row, 0);
+            fl->addLayout(mixRow, row, 1, 1, 3);
+            
+            auto *rateRow = new QHBoxLayout();
+            m_spinFontMixRate = new QDoubleSpinBox(fontGroup);
+            m_spinFontMixRate->setRange(0.0, 1.0);
+            m_spinFontMixRate->setSingleStep(0.05);
+            m_spinFontMixRate->setDecimals(2);
+            m_spinFontMixRate->setValue(0.20);
+            connect(m_spinFontMixRate, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                    this, &MainWindow::onParameterChanged);
+            rateRow->addWidget(m_spinFontMixRate);
+            rateRow->addWidget(new QLabel(tr("（出现概率）"), fontGroup));
+            rateRow->addStretch();
+            fl->addWidget(new QLabel(tr("混合比例:"), fontGroup), row + 1, 0);
+            fl->addLayout(rateRow, row + 1, 1, 1, 3);
+        }
+    }
+    
+    // ── 随机种子：固定后预览与导出结果一致 ──
+    auto *seedGroup = new QGroupBox(tr("随机种子"), scrollContent);
+    auto *seedLayout = new QHBoxLayout(seedGroup);
+    m_lineEditSeed = new QLineEdit(seedGroup);
+    m_lineEditSeed->setValidator(new QIntValidator(0, 2000000000, this));
+    m_lineEditSeed->setToolTip(tr("相同种子 + 相同参数 = 完全相同的结果；0 表示每次随机"));
+    connect(m_lineEditSeed, &QLineEdit::textChanged, this, &MainWindow::onParameterChanged);
+    auto *btnNewSeed = new QPushButton(tr("重新随机"), seedGroup);
+    connect(btnNewSeed, &QPushButton::clicked, this, &MainWindow::onPushButtonNewSeedClicked);
+    seedLayout->addWidget(new QLabel(tr("种子:"), seedGroup));
+    seedLayout->addWidget(m_lineEditSeed, 1);
+    seedLayout->addWidget(btnNewSeed);
+    
     // 预设管理
     auto *presetGroup = new QGroupBox(tr("预设管理"), scrollContent);
     auto *presetLayout = new QVBoxLayout(presetGroup);
@@ -341,9 +427,12 @@ void MainWindow::setupDynamicUi() {
     presetBtnLayout->addWidget(btnDelPreset); presetBtnLayout->addStretch();
     presetLayout->addWidget(m_presetList); presetLayout->addLayout(presetBtnLayout);
     
-    // PDF按钮（添加到导出布局）
+    // PDF / SVG 按钮（添加到导出布局）
     auto *pdfBtn = new QPushButton(tr("导出PDF"), scrollContent);
     connect(pdfBtn, &QPushButton::clicked, this, &MainWindow::onPushButtonExportPdfClicked);
+    auto *svgBtn = new QPushButton(tr("导出SVG"), scrollContent);
+    svgBtn->setToolTip(tr("矢量格式，多页文档会输出多个 .svg 文件"));
+    connect(svgBtn, &QPushButton::clicked, this, &MainWindow::onPushButtonExportSvgClicked);
     
     // 插入位置：在扰动组之后、预设之前
     int perturbIdx = -1;
@@ -358,19 +447,22 @@ void MainWindow::setupDynamicUi() {
     infoLayout->insertWidget(insertPos++, bgGroup);
     infoLayout->insertWidget(insertPos++, paraGroup);
     infoLayout->insertWidget(insertPos++, effectGroup);
+    infoLayout->insertWidget(insertPos++, seedGroup);
     infoLayout->insertWidget(insertPos++, presetGroup);
-    // PDF按钮插入到导出按钮旁
+    // PDF / SVG 按钮插入到导出按钮旁
     for(int i=0;i<infoLayout->count();++i){
         auto* item = infoLayout->itemAt(i);
         if(item && item->layout()){
             auto* hl = qobject_cast<QHBoxLayout*>(item->layout());
             if(hl && hl->objectName()=="exportLayout"){
-                hl->addWidget(pdfBtn); break;
+                hl->addWidget(pdfBtn); hl->addWidget(svgBtn); break;
             }
         }
     }
     
     refreshPresetList();
+    updateFontMixLabel();
+    if(m_lineEditSeed && m_lineEditSeed->text().isEmpty()) onPushButtonNewSeedClicked();
 }
 
 //=============================================================================
@@ -426,7 +518,18 @@ void MainWindow::populateComboBoxes() {
     auto [fontNames,fontPaths]=m_tools.getTtfFiles();
     m_cachedFontNames=fontNames; m_cachedFontPaths=fontPaths;
     ui->comboBoxFont->clear();
-    for(const auto& n:m_cachedFontNames) ui->comboBoxFont->addItem(QString::fromStdString(n));
+    for(size_t i=0;i<m_cachedFontNames.size();++i){
+        QString label = QString::fromStdString(m_cachedFontNames[i]);
+        std::string err;
+        if(!HandwriteGenerator::checkFontAvailable(m_cachedFontPaths[i], &err)){
+            // 字体加载失败时引擎会静默回退到系统默认字体，这里在界面上显式标注
+            label += tr("（无法加载）");
+            ui->comboBoxFont->addItem(label);
+            ui->comboBoxFont->setItemData(static_cast<int>(i), QString::fromStdString(err), Qt::ToolTipRole);
+        } else {
+            ui->comboBoxFont->addItem(label);
+        }
+    }
     if(!m_cachedFontPaths.empty()) m_generator.setFont(m_cachedFontPaths[0],m_generator.templateParams().fontSize);
     
     ui->comboBoxCharColor->clear();
@@ -486,8 +589,8 @@ void MainWindow::triggerAutoPreview() {
     }
     TemplateParams params=getParamsFromForm();
     QString text=getTextFromTextEdit();
-    m_exportRate=params.rate;
     int previewRate=qMin(params.rate,4);
+    m_cancelFlag->store(false);
     m_previewWatcher->setFuture(QtConcurrent::run([this,params,text,previewRate](){
         return generatePreviewAsync(params,text,previewRate);
     }));
@@ -553,6 +656,11 @@ TemplateParams MainWindow::getParamsFromForm() {
     p.inkBleedRadius=m_spinInkBleedRadius->value();
     p.strikeThroughRate=m_spinStrikeThroughRate->value();
     p.strokeWidthSigma=m_spinStrokeWidthSigma->value();
+    p.preserveChinesePunctuation=m_checkPreservePunct->isChecked();
+    p.textWarpStrength=m_spinTextWarpStrength->value();
+    p.fontMixList=m_fontMixPaths;
+    p.fontMixRate=m_spinFontMixRate->value();
+    p.seed=static_cast<unsigned int>(qMax(0, m_lineEditSeed->text().toInt()));
     p.charOverrides=m_charOverrides;
     return p;
 }
@@ -565,25 +673,59 @@ QString MainWindow::getTextFromTextEdit() { return ui->textEditMain->toPlainText
 
 void MainWindow::updatePreview() { triggerAutoPreview(); }
 
+bool MainWindow::guardRenderBudget(const TemplateParams& params) {
+    // 页数相关的峰值检查在引擎内部完成；这里只拦「单页就超上限」的情况，
+    // 可以在启动渲染前就给出提示，而不是等异常。
+    const long long per = HandwriteGenerator::estimateSinglePageBytes(params);
+    if (per <= HandwriteGenerator::MAX_SINGLE_PAGE_BYTES) return true;
+    const double perGb   = static_cast<double>(per) / (1024.0*1024*1024);
+    const double limitGb = static_cast<double>(HandwriteGenerator::MAX_SINGLE_PAGE_BYTES) / (1024.0*1024*1024);
+    QMessageBox::warning(this, tr("内存不足"), tr(
+        "当前设置单页需要约 %1 GB 内存，超过 %2 GB 上限。\n\n"
+        "请降低分辨率倍率（当前 x%3）、缩小纸张尺寸，或关闭墨水洇染 / 背景图片。")
+        .arg(perGb, 0, 'f', 1).arg(limitGb, 0, 'f', 0).arg(params.rate));
+    return false;
+}
+
+void MainWindow::requestCancel() {
+    m_cancelFlag->store(true);
+    statusBar()->showMessage(tr("正在取消…"), 3000);
+}
+
 void MainWindow::onPushButtonPreviewClicked() {
     if(m_previewWatcher->isRunning()||m_exportWatcher->isRunning()){
         QMessageBox::warning(this,tr("请稍候"),tr("正在处理中...")); return;
     }
     TemplateParams p=getParamsFromForm(); QString text=getTextFromTextEdit();
-    m_exportRate=p.rate; int pr=qMin(p.rate,4);
+    const int pr=qMin(p.rate,4);
+    TemplateParams pp=p; pp.rate=pr;
+    if(!guardRenderBudget(pp)) return;
+    m_cancelFlag->store(false);
     setupProgressDialog(tr("正在生成预览..."));
     m_previewWatcher->setFuture(QtConcurrent::run([this,p,text,pr](){return generatePreviewAsync(p,text,pr);}));
 }
 
-std::vector<QImage> MainWindow::generatePreviewAsync(TemplateParams params, QString text, int previewRate) {
-    HandwriteGenerator g; params.rate=previewRate; g.modifyTemplateParams(params);
-    return g.generatePreviewParallel(text.toStdString());
+RenderOutcome MainWindow::generatePreviewAsync(TemplateParams params, QString text, int previewRate) {
+    RenderOutcome out;
+    try {
+        HandwriteGenerator g; params.rate=previewRate; g.modifyTemplateParams(params);
+        out.images = g.generatePreviewParallel(text.toStdString());
+    } catch (const std::exception& e) {
+        out.error = QString::fromUtf8(e.what());
+    }
+    return out;
 }
 
 void MainWindow::onPreviewFinished() {
     if(m_progressDialog)m_progressDialog->close();
     if(m_previewWatcher->isCanceled()){ checkPendingPreview(); return; }
-    m_previewImages=m_previewWatcher->result();
+    const RenderOutcome out=m_previewWatcher->result();
+    if(!out.error.isEmpty()){
+        statusBar()->showMessage(tr("预览失败"),5000);
+        QMessageBox::warning(this,tr("无法渲染"),out.error);
+        checkPendingPreview(); return;
+    }
+    m_previewImages=out.images;
     m_totalPages=static_cast<int>(m_previewImages.size());m_currentPage=0;
     updatePaginationUI();
     if(!m_previewImages.empty())showImage(m_previewImages[0]);
@@ -608,31 +750,64 @@ void MainWindow::checkPendingPreview() {
 
 void MainWindow::onPushButtonExportClicked() {
     if(m_previewWatcher->isRunning()||m_exportWatcher->isRunning()){QMessageBox::warning(this,tr("请稍候"),tr("正在处理中..."));return;}
-    QString od="outputs"; QDir d(od);
-    if(d.exists()){for(const auto& f:d.entryList(QDir::Files))d.remove(f);}else d.mkpath(".");
+    const QString od="outputs"; QDir d(od);
+    if(!d.exists()) d.mkpath(".");
+    // 注意：这里不再清空输出目录。
+    // 旧实现在此处遍历删除 outputs/ 下「所有」文件（不限扩展名），
+    // 既与 v2.5.1 的数据安全修复自相矛盾，也会误删用户自己放进来的文件。
+    // 现在清理职责只由引擎内部的 cleanGeneratedPages() 承担——它只删本程序
+    // 生成的、以纯数字命名的页码 PNG。
     TemplateParams p=getParamsFromForm(); QString text=getTextFromTextEdit();
-    if(p.rate>=16){if(QMessageBox::question(this,tr("高分辨率"),tr("x%1 可能较慢，继续?").arg(p.rate))!=QMessageBox::Yes)return;}
+    if(!guardRenderBudget(p)) return;
+    if(p.rate>=16){
+        const double mb = static_cast<double>(HandwriteGenerator::estimateSinglePageBytes(p))/(1024.0*1024.0);
+        if(QMessageBox::question(this,tr("高分辨率"),
+              tr("x%1 单页约需 %2 MB 内存，可能较慢，继续?").arg(p.rate).arg(static_cast<int>(mb)))
+           !=QMessageBox::Yes) return;
+    }
+    m_cancelFlag->store(false);
     setupProgressDialog(tr("正在导出..."));
     m_exportWatcher->setFuture(QtConcurrent::run([this,p,text,od](){return generateExportAsync(p,text,od);}));
 }
 
-std::map<int,std::string> MainWindow::generateExportAsync(TemplateParams params, QString text, QString outputDir) {
-    HandwriteGenerator g; g.modifyTemplateParams(params);
-    return g.generateImageParallel(text.toStdString(),outputDir.toStdString(),0,[this](int cur,int tot){
-        QMetaObject::invokeMethod(this,[this,cur,tot](){
-            if(m_progressDialog){int tp=tot/2; m_progressDialog->setMaximum(tot); m_progressDialog->setValue(cur);
-            QString s=cur<=tp?tr("渲染 %1/%2").arg(cur).arg(tp):tr("保存 %1/%2").arg(cur-tp).arg(tp);
-            m_progressDialog->setLabelText(s);}
-        },Qt::QueuedConnection);
-    });
+ExportOutcome MainWindow::generateExportAsync(TemplateParams params, QString text, QString outputDir) {
+    ExportOutcome out;
+    auto cancelFlag=m_cancelFlag;
+    try {
+        HandwriteGenerator g; g.modifyTemplateParams(params);
+        out.files = g.generateImageParallel(text.toStdString(),outputDir.toStdString(),0,
+            [this](int cur,int tot){
+                QMetaObject::invokeMethod(this,[this,cur,tot](){
+                    if(m_progressDialog){
+                        m_progressDialog->setMaximum(qMax(1,tot));
+                        m_progressDialog->setValue(cur);
+                        m_progressDialog->setLabelText(tr("渲染 %1/%2").arg(cur).arg(tot));
+                    }
+                },Qt::QueuedConnection);
+            },
+            [cancelFlag](){ return cancelFlag->load(); });
+    } catch (const std::exception& e) {
+        out.error = QString::fromUtf8(e.what());
+    }
+    return out;
 }
 
 void MainWindow::onExportFinished() {
     if(m_exportWatcher->isCanceled()){if(m_progressDialog)m_progressDialog->close();return;}
-    m_previewImagePaths=m_exportWatcher->result();
-    int tp=static_cast<int>(m_previewImagePaths.size()),ts=tp*2;
-    if(m_progressDialog){m_progressDialog->setMaximum(ts>0?ts:1);m_progressDialog->setValue(ts>0?ts:1);
-    m_progressDialog->setLabelText(tr("完成")); QCoreApplication::processEvents(); QThread::msleep(500); m_progressDialog->close();}
+    const ExportOutcome out=m_exportWatcher->result();
+    if(m_progressDialog){m_progressDialog->close();}
+    
+    if(!out.error.isEmpty()){
+        QMessageBox::warning(this,tr("导出失败"),out.error);
+        return;
+    }
+    if(out.files.empty()){
+        QMessageBox::information(this,tr("已取消"),tr("导出已取消，未生成任何文件"));
+        return;
+    }
+    
+    m_previewImagePaths=out.files;
+    int tp=static_cast<int>(m_previewImagePaths.size());
     m_totalPages=tp;m_currentPage=0;updatePaginationUI();
     if(!m_previewImagePaths.empty())showImage(QString::fromStdString(m_previewImagePaths[0]));
     QMessageBox msgBox(this); msgBox.setWindowTitle(tr("导出完成"));
@@ -640,6 +815,33 @@ void MainWindow::onExportFinished() {
     auto* obtn=msgBox.addButton(tr("打开目录"),QMessageBox::ActionRole); msgBox.addButton(QMessageBox::Ok);
     msgBox.exec();
     if(msgBox.clickedButton()==obtn) QDesktopServices::openUrl(QUrl::fromLocalFile(QDir("outputs").absolutePath()));
+}
+
+//=============================================================================
+// SVG 导出
+//=============================================================================
+
+void MainWindow::onPushButtonExportSvgClicked() {
+    if(m_previewWatcher->isRunning()||m_exportWatcher->isRunning()){QMessageBox::warning(this,tr("请稍候"),tr("正在处理中..."));return;}
+    QString path=QFileDialog::getSaveFileName(this,tr("导出SVG"),"output.svg",tr("SVG Files (*.svg)"));
+    if(path.isEmpty())return;
+    TemplateParams p=getParamsFromForm();
+    if(!guardRenderBudget(p)) return;
+    const QString text=getTextFromTextEdit();   // 先在工作线程外取好，避免跨线程读 UI
+    setupProgressDialog(tr("正在生成SVG..."));
+    QFuture<bool> future=QtConcurrent::run([p,text,path](){
+        HandwriteGenerator g; g.modifyTemplateParams(p);
+        return g.exportSvg(text.toStdString(),path.toStdString());
+    });
+    auto* watcher=new QFutureWatcher<bool>(this);
+    connect(watcher,&QFutureWatcher<bool>::finished,this,[this,watcher,path](){
+        if(m_progressDialog)m_progressDialog->close();
+        if(watcher->result()) QMessageBox::information(this,tr("导出完成"),
+            tr("SVG 已保存到:\n%1\n\n多页文档还会生成 %1 同目录下的 -2、-3 … 文件").arg(path));
+        else QMessageBox::warning(this,tr("导出失败"),tr("无法生成SVG（可能未选择字体或内存不足）"));
+        watcher->deleteLater();
+    });
+    watcher->setFuture(future);
 }
 
 //=============================================================================
@@ -651,10 +853,15 @@ void MainWindow::onPushButtonExportPdfClicked() {
     QString path=QFileDialog::getSaveFileName(this,tr("导出PDF"),"",tr("PDF Files (*.pdf)"));
     if(path.isEmpty())return;
     TemplateParams p=getParamsFromForm();
+    if(!guardRenderBudget(p)) return;
+    // 文本必须在主线程取好再捕获进工作线程
+    // （旧实现把 getTextFromTextEdit() 写在 QtConcurrent::run 的 lambda 里，
+    //   等于在工作线程访问 QWidget，是未定义行为）
+    const QString text=getTextFromTextEdit();
     setupProgressDialog(tr("正在生成PDF..."));
-    QFuture<bool> future=QtConcurrent::run([this,p,path](){
+    QFuture<bool> future=QtConcurrent::run([p,text,path](){
         HandwriteGenerator g; g.modifyTemplateParams(p);
-        return g.exportPdf(getTextFromTextEdit().toStdString(),path.toStdString());
+        return g.exportPdf(text.toStdString(),path.toStdString());
     });
     auto* watcher=new QFutureWatcher<bool>(this);
     connect(watcher,&QFutureWatcher<bool>::finished,this,[this,watcher,path](){
@@ -731,20 +938,30 @@ void MainWindow::onPushButtonCalibrateBgClicked() {
 //=============================================================================
 
 QString MainWindow::presetDir() const {
-    QString d=QCoreApplication::applicationDirPath()+"/presets";
-    QDir().mkpath(d); return d;
+    // 放到用户数据目录：程序若安装在 Program Files 下 applicationDirPath() 不可写，
+    // 而且多用户会互相覆盖预设
+    QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (base.isEmpty()) base = QCoreApplication::applicationDirPath();
+    QString d = base + "/presets";
+    QDir().mkpath(d);
+    return d;
 }
 
 void MainWindow::refreshPresetList() {
+    if (!m_presetList) return;
     m_presetList->clear();
     QDir d(presetDir());
-    for(const auto& f:d.entryList({"*.toml"},QDir::Files)) m_presetList->addItem(f);
+    // 同时列出历史 .toml 预设（旧版本用的扩展名），新建统一用 .conf
+    for(const auto& f:d.entryList({"*.conf","*.toml"},QDir::Files|QDir::Readable,QDir::Name))
+        m_presetList->addItem(f);
 }
 
 void MainWindow::onPushButtonPresetSaveClicked() {
     QString name=QInputDialog::getText(this,tr("保存预设"),tr("预设名称:"));
     if(name.isEmpty())return;
-    QString path=presetDir()+"/"+name+".toml";
+    // 去掉文件名非法字符
+    name.replace(QRegularExpression("[/\\\\:*?\"<>|]"), "_");
+    QString path=presetDir()+"/"+name+".conf";
     saveConfiguration(path);
     refreshPresetList();
 }
@@ -801,6 +1018,31 @@ void MainWindow::saveConfiguration(const QString& path) {
     c.setInkBleedRadius(m_spinInkBleedRadius->value());
     c.setStrikeThroughRate(m_spinStrikeThroughRate->value());
     c.setStrokeWidthSigma(m_spinStrokeWidthSigma->value());
+    // ---- 以下参数此前完全没有写入配置，导致保存预设后再加载会丢失 ----
+    c.setTextDirection(m_comboTextDirection->currentIndex());
+    c.setTextWarp(m_comboTextWarp->currentIndex());
+    c.setTextWarpStrength(m_spinTextWarpStrength->value());
+    c.setPreserveChinesePunctuation(m_checkPreservePunct->isChecked());
+    c.setFontMixList(m_fontMixPaths);
+    c.setFontMixRate(m_spinFontMixRate->value());
+    c.setSeed(static_cast<unsigned int>(qMax(0, m_lineEditSeed->text().toInt())));
+    // 背景图片锚点校准
+    c.setBgCalibEnabled(m_bgCalibration.isValid());
+    if(m_bgCalibration.isValid()){
+        c.setBgCalibRows(m_bgCalibration.rows);
+        c.setBgCalibCols(m_bgCalibration.cols);
+        std::vector<double> pts;
+        pts.reserve(m_bgCalibration.gridPoints.size()*2);
+        for(const auto& pt:m_bgCalibration.gridPoints){ pts.push_back(pt.x()); pts.push_back(pt.y()); }
+        c.setBgCalibPoints(pts);
+    }
+    // 字符级覆盖
+    {
+        std::vector<std::string> list;
+        list.reserve(m_charOverrides.size());
+        for(const auto& r:m_charOverrides) list.push_back(HandwriteGenerator::serializeCharOverride(r));
+        c.setCharOverrides(list);
+    }
     if(c.save(path.toStdString()))QMessageBox::information(this,tr("成功"),tr("已保存"));
     else QMessageBox::warning(this,tr("失败"),tr("无法保存"));
     ui->labelCurrentConfig->setText(tr("当前配置文件:\n%1").arg(path));
@@ -839,6 +1081,35 @@ void MainWindow::loadConfiguration(const QString& path) {
     if(auto v=c.inkBleedRadius())m_spinInkBleedRadius->setValue(*v);
     if(auto v=c.strikeThroughRate())m_spinStrikeThroughRate->setValue(*v);
     if(auto v=c.strokeWidthSigma())m_spinStrokeWidthSigma->setValue(*v);
+    if(auto v=c.textDirection())m_comboTextDirection->setCurrentIndex(*v);
+    if(auto v=c.textWarp())m_comboTextWarp->setCurrentIndex(*v);
+    if(auto v=c.textWarpStrength())m_spinTextWarpStrength->setValue(*v);
+    if(auto v=c.preserveChinesePunctuation())m_checkPreservePunct->setChecked(*v);
+    if(auto v=c.fontMixList()){ m_fontMixPaths=*v; updateFontMixLabel(); }
+    if(auto v=c.fontMixRate())m_spinFontMixRate->setValue(*v);
+    if(auto v=c.seed())m_lineEditSeed->setText(QString::number(*v));
+    // 背景锚点校准
+    if(c.bgCalibEnabled().value_or(false)){
+        const int rows=c.bgCalibRows().value_or(3), cols=c.bgCalibCols().value_or(3);
+        if(auto pts=c.bgCalibPoints()){
+            if(static_cast<int>(pts->size())==rows*cols*2){
+                BackgroundCalibration cal;
+                cal.enabled=true; cal.rows=rows; cal.cols=cols;
+                cal.gridPoints.resize(rows*cols);
+                for(int i=0;i<rows*cols;++i)
+                    cal.gridPoints[i]=QPointF((*pts)[i*2],(*pts)[i*2+1]);
+                m_bgCalibration=cal;
+            }
+        }
+    }
+    // 字符级覆盖
+    if(auto list=c.charOverrides()){
+        m_charOverrides.clear();
+        for(const auto& s:*list){
+            if(auto r=HandwriteGenerator::deserializeCharOverride(s)) m_charOverrides.push_back(*r);
+        }
+        updateCharOverrideLabel();
+    }
     ui->labelCurrentConfig->setText(tr("当前配置文件:\n%1").arg(path));
     onParameterChanged();
 }
@@ -848,11 +1119,13 @@ void MainWindow::loadConfiguration(const QString& path) {
 //=============================================================================
 
 void MainWindow::onPushButtonSaveConfigClicked() {
-    QString p=QFileDialog::getSaveFileName(this,tr("保存配置"),"",tr("TOML Files (*.toml)"));
+    QString p=QFileDialog::getSaveFileName(this,tr("保存配置"),"preset.conf",
+        tr("配置文件 (*.conf);;旧版配置 (*.toml);;所有文件 (*)"));
     if(!p.isEmpty())saveConfiguration(p);
 }
 void MainWindow::onPushButtonLoadConfigClicked() {
-    QString p=QFileDialog::getOpenFileName(this,tr("加载配置"),"",tr("TOML Files (*.toml)"));
+    QString p=QFileDialog::getOpenFileName(this,tr("加载配置"),"",
+        tr("配置文件 (*.conf *.toml);;所有文件 (*)"));
     if(!p.isEmpty())loadConfiguration(p);
 }
 
@@ -877,6 +1150,79 @@ void MainWindow::onPushButtonCharOverrideClicked() {
 }
 void MainWindow::onPushButtonClearOverridesClicked() { m_charOverrides.clear(); updateCharOverrideLabel(); updatePreview(); }
 void MainWindow::updateCharOverrideLabel() { ui->labelCharOverride->setText(tr("字符覆盖: %1 处").arg(m_charOverrides.size())); }
+
+//=============================================================================
+// 混合字体
+//=============================================================================
+
+FontMixDialog::FontMixDialog(const std::vector<std::string>& fontNames,
+                             const std::vector<std::string>& fontPaths,
+                             const std::vector<std::string>& selected,
+                             QWidget* parent)
+    : QDialog(parent), m_list(new QListWidget(this)), m_fontPaths(fontPaths) {
+    setWindowTitle(tr("选择混合字体"));
+    resize(360, 420);
+    auto* layout = new QVBoxLayout(this);
+    layout->addWidget(new QLabel(tr("勾选参与随机混合的字体（正文仍以主字体为主）:"), this));
+    layout->addWidget(m_list, 1);
+    
+    for (size_t i = 0; i < fontNames.size(); ++i) {
+        const std::string& path = (i < fontPaths.size()) ? fontPaths[i] : std::string();
+        auto* item = new QListWidgetItem(QString::fromStdString(fontNames[i]), m_list);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        const bool on = std::find(selected.begin(), selected.end(), path) != selected.end();
+        item->setCheckState(on ? Qt::Checked : Qt::Unchecked);
+        item->setData(Qt::UserRole, QString::fromStdString(path));
+    }
+    
+    auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    layout->addWidget(btns);
+}
+
+std::vector<std::string> FontMixDialog::selectedPaths() const {
+    std::vector<std::string> out;
+    for (int i = 0; i < m_list->count(); ++i) {
+        if (m_list->item(i)->checkState() == Qt::Checked) {
+            out.push_back(m_list->item(i)->data(Qt::UserRole).toString().toStdString());
+        }
+    }
+    return out;
+}
+
+void MainWindow::updateFontMixLabel() {
+    if (!m_labelFontMix) return;
+    if (m_fontMixPaths.empty()) {
+        m_labelFontMix->setText(tr("未启用"));
+        return;
+    }
+    QStringList names;
+    for (const auto& p : m_fontMixPaths) {
+        names << QFileInfo(QString::fromStdString(p)).baseName();
+    }
+    m_labelFontMix->setText(tr("%1 个字体").arg(names.size()));
+    m_labelFontMix->setToolTip(names.join("、"));
+}
+
+void MainWindow::onPushButtonFontMixClicked() {
+    FontMixDialog dlg(m_cachedFontNames, m_cachedFontPaths, m_fontMixPaths, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        m_fontMixPaths = dlg.selectedPaths();
+        updateFontMixLabel();
+        onParameterChanged();
+    }
+}
+
+//=============================================================================
+// 随机种子
+//=============================================================================
+
+void MainWindow::onPushButtonNewSeedClicked() {
+    if (!m_lineEditSeed) return;
+    m_lineEditSeed->setText(QString::number(makeRandomSeed()));
+    onParameterChanged();
+}
 
 //=============================================================================
 // 分页
@@ -929,22 +1275,22 @@ void MainWindow::onComboBoxPaperTemplateCurrentIndexChanged(int) {
 //=============================================================================
 // CalibrationDialog 实现 — 四角锚点 + 精细网格
 //=============================================================================
+// 全部改用真实布局：旧实现用 setGeometry + setFixedSize 绝对定位按钮，
+// 在系统缩放/字体放大时按钮会重叠、标签会跑位。
 
 CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent)
     : QDialog(parent), m_rows(3), m_cols(3) {
     setWindowTitle(tr("网格校准 — 拖拽四角锚点适配纸面"));
+    setMinimumSize(480, 400);
+    resize(840, 640);
     
     // 使用统一加载器（含 WebP 回退）
     m_image = loadImageWithWebpFallback(imagePath.toStdString());
     if (m_image.isNull()) {
         QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片（格式不支持或文件损坏）"));
-        reject();
+        QMetaObject::invokeMethod(this, [this]() { reject(); }, Qt::QueuedConnection);
         return;
     }
-    
-    m_scaledPixmap = QPixmap::fromImage(m_image.scaled(760, 520, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    int btnBarHeight = 75;
-    setFixedSize(m_scaledPixmap.width() + 20, m_scaledPixmap.height() + btnBarHeight);
     
     // 恢复已有校准 或 默认四角模式
     if (calib.enabled && calib.isValid()) {
@@ -956,83 +1302,97 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
         applyMode(true);  // 默认四角模式
     }
     
-    // ── 底部按钮栏 ──
-    int btnY = m_scaledPixmap.height() + 8;
-    int bw = 28, bh = 28, gap = 5;
+    // ── 根布局：图片区（自适应） + 按钮栏 ──
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(8, 8, 8, 8);
+    root->setSpacing(6);
     
-    auto makeBtn = [&](const QString& text, int x) {
-        auto* b = new QPushButton(text, this);
-        b->setGeometry(x, btnY, bw, bh);
-        b->setFont(QFont("", 10));
+    m_canvas = new QWidget(this);
+    m_canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_canvas->setMinimumHeight(240);
+    // 鼠标事件穿透到对话框，统一在对话框里做命中测试
+    m_canvas->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    root->addWidget(m_canvas, 1);
+    
+    auto* btnBar = new QWidget(this);
+    auto* bl = new QHBoxLayout(btnBar);
+    bl->setContentsMargins(0, 0, 0, 0);
+    bl->setSpacing(5);
+    
+    auto makeBtn = [&](const QString& text, const QString& tip = QString()) {
+        auto* b = new QPushButton(text, btnBar);
+        b->setMinimumWidth(34);
+        if (!tip.isEmpty()) b->setToolTip(tip);
         return b;
     };
     
     // 模式切换按钮（始终可见）
-    m_modeBtn = new QPushButton(tr("精细调整 ↗"), this);
-    m_modeBtn->setGeometry(gap, btnY, 100, bh);
-    m_modeBtn->setFont(QFont("", 9));
-    m_modeBtn->setStyleSheet("QPushButton { color: #5af; border: 1px solid #5af; border-radius: 4px; padding: 2px 6px; }"
+    m_modeBtn = new QPushButton(tr("精细调整 ↗"), btnBar);
+    m_modeBtn->setStyleSheet("QPushButton { color: #5af; border: 1px solid #5af;"
+                             " border-radius: 4px; padding: 2px 8px; }"
                              "QPushButton:hover { background: rgba(80,170,255,.15); }");
     if (!m_cornerMode) m_modeBtn->setText(tr("四角模式 ↙"));
+    bl->addWidget(m_modeBtn);
+    bl->addSpacing(10);
     
+    m_btnColM = makeBtn("-", tr("减少网格列数"));
+    m_lblCol = new QLabel(tr("列:%1").arg(m_cols), btnBar);
+    m_btnColP = makeBtn("+", tr("增加网格列数"));
+    bl->addWidget(m_btnColM); bl->addWidget(m_lblCol); bl->addWidget(m_btnColP);
+    bl->addSpacing(10);
+    
+    m_btnRowM = makeBtn("-", tr("减少网格行数"));
+    m_lblRow = new QLabel(tr("行:%1").arg(m_rows), btnBar);
+    m_btnRowP = makeBtn("+", tr("增加网格行数"));
+    bl->addWidget(m_btnRowM); bl->addWidget(m_lblRow); bl->addWidget(m_btnRowP);
+    bl->addSpacing(10);
+    
+    m_btnReset = new QPushButton(tr("重置"), btnBar);
+    bl->addWidget(m_btnReset);
+    
+    bl->addStretch();
+    
+    auto* btnOk = new QPushButton(tr("确定"), btnBar);
+    btnOk->setDefault(true);
+    auto* btnCancel = new QPushButton(tr("取消"), btnBar);
+    bl->addWidget(btnOk);
+    bl->addWidget(btnCancel);
+    
+    root->addWidget(btnBar, 0);
+    
+    // ── 连接 ──
     connect(m_modeBtn, &QPushButton::clicked, this, [this]() {
         if (m_cornerMode) {
-            // 四角 → 精细：初始 3×3，内部点由四角插值
+            // 四角 → 精细：内部点由四角双线性插值
             applyMode(false, 3, 3);
-            m_lblCol->setText(QString("列:%1").arg(m_cols));
-            m_lblRow->setText(QString("行:%1").arg(m_rows));
             m_modeBtn->setText(tr("四角模式 ↙"));
             m_btnColP->show(); m_btnColM->show(); m_lblCol->show();
             m_btnRowP->show(); m_btnRowM->show(); m_lblRow->show();
             m_btnReset->show();
         } else {
-            // 精细 → 四角：保留四角，缩为 2×2
+            // 精细 → 四角：保留四角
             applyMode(true);
             m_modeBtn->setText(tr("精细调整 ↗"));
             m_btnColP->hide(); m_btnColM->hide(); m_lblCol->hide();
             m_btnRowP->hide(); m_btnRowM->hide(); m_lblRow->hide();
             m_btnReset->hide();
         }
+        m_lblCol->setText(tr("列:%1").arg(m_cols));
+        m_lblRow->setText(tr("行:%1").arg(m_rows));
         update();
     });
     
-    int x = gap + 108;
-    
-    m_btnColP = makeBtn("+", x); x += bw + gap;
-    m_btnColM = makeBtn("-", x); x += bw + gap;
-    m_lblCol = new QLabel(this);
-    m_lblCol->setText(QString("列:%1").arg(m_cols));
-    m_lblCol->setGeometry(x, btnY, 50, bh);
-    m_lblCol->setStyleSheet("color: white;");
-    x += 55;
-    
-    m_btnRowP = makeBtn("+", x); x += bw + gap;
-    m_btnRowM = makeBtn("-", x); x += bw + gap;
-    m_lblRow = new QLabel(this);
-    m_lblRow->setText(QString("行:%1").arg(m_rows));
-    m_lblRow->setGeometry(x, btnY, 50, bh);
-    m_lblRow->setStyleSheet("color: white;");
-    x += 55;
-    
-    m_btnReset = new QPushButton(tr("重置"), this);
-    m_btnReset->setGeometry(x, btnY, 50, bh);
-    
-    auto* btnOk = new QPushButton(tr("确定"), this);
-    btnOk->setGeometry(width() - 90, btnY, 70, bh);
-    btnOk->setDefault(true);
-    
-    // ── 连接 ──
     connect(m_btnColP, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_cols < 5) { applyMode(false, m_rows, m_cols + 1); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+        if (!m_cornerMode && m_cols < 5) { applyMode(false, m_rows, m_cols + 1); m_lblCol->setText(tr("列:%1").arg(m_cols)); update(); }
     });
     connect(m_btnColM, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_cols > 2) { applyMode(false, m_rows, m_cols - 1); m_lblCol->setText(QString("列:%1").arg(m_cols)); update(); }
+        if (!m_cornerMode && m_cols > 2) { applyMode(false, m_rows, m_cols - 1); m_lblCol->setText(tr("列:%1").arg(m_cols)); update(); }
     });
     connect(m_btnRowP, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_rows < 5) { applyMode(false, m_rows + 1, m_cols); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+        if (!m_cornerMode && m_rows < 5) { applyMode(false, m_rows + 1, m_cols); m_lblRow->setText(tr("行:%1").arg(m_rows)); update(); }
     });
     connect(m_btnRowM, &QPushButton::clicked, this, [this]() {
-        if (!m_cornerMode && m_rows > 2) { applyMode(false, m_rows - 1, m_cols); m_lblRow->setText(QString("行:%1").arg(m_rows)); update(); }
+        if (!m_cornerMode && m_rows > 2) { applyMode(false, m_rows - 1, m_cols); m_lblRow->setText(tr("行:%1").arg(m_rows)); update(); }
     });
     connect(m_btnReset, &QPushButton::clicked, this, [this]() {
         if (m_cornerMode) { applyMode(true); }
@@ -1040,6 +1400,7 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
         update();
     });
     connect(btnOk, &QPushButton::clicked, this, &QDialog::accept);
+    connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);
     
     // 初始显示状态
     if (m_cornerMode) {
@@ -1049,6 +1410,24 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     }
     
     setMouseTracking(true);
+}
+
+void CalibrationDialog::resizeEvent(QResizeEvent*) { relayoutCanvas(); }
+
+void CalibrationDialog::relayoutCanvas() {
+    if (!m_canvas || m_image.isNull()) return;
+    const QRect area = m_canvas->geometry();
+    if (area.width() < 2 || area.height() < 2) return;
+    
+    const qreal scale = std::min(static_cast<qreal>(area.width())  / m_image.width(),
+                                 static_cast<qreal>(area.height()) / m_image.height());
+    const int w = std::max(1, static_cast<int>(m_image.width()  * scale));
+    const int h = std::max(1, static_cast<int>(m_image.height() * scale));
+    m_scaledPixmap = QPixmap::fromImage(m_image.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    m_drawRect = QRect(area.x() + (area.width()  - m_scaledPixmap.width())  / 2,
+                       area.y() + (area.height() - m_scaledPixmap.height()) / 2,
+                       m_scaledPixmap.width(), m_scaledPixmap.height());
+    update();
 }
 
 void CalibrationDialog::applyMode(bool cornerMode, int newRows, int newCols) {
@@ -1071,7 +1450,7 @@ void CalibrationDialog::applyMode(bool cornerMode, int newRows, int newCols) {
         m_cornerMode = true;
         m_points = corners;
     } else {
-        int oldRows = m_rows, oldCols = m_cols;
+        const int oldRows = m_rows, oldCols = m_cols;
         m_rows = newRows; m_cols = newCols;
         m_cornerMode = false;
         // 从四角双线性插值出内部点（用旧网格坐标取角，兼容 2×2 和 N×M）
@@ -1128,71 +1507,65 @@ BackgroundCalibration CalibrationDialog::getCalibration() const {
     return c;
 }
 
-// 坐标转换保持不变
 QPointF CalibrationDialog::toImageCoords(const QPoint& widgetPos) const {
-    qreal rx = static_cast<qreal>(m_image.width()) / m_scaledPixmap.width();
-    qreal ry = static_cast<qreal>(m_image.height()) / m_scaledPixmap.height();
-    return QPointF(widgetPos.x() * rx, widgetPos.y() * ry);
+    if (m_drawRect.width() < 1 || m_drawRect.height() < 1) return QPointF();
+    const qreal rx = static_cast<qreal>(m_image.width())  / m_drawRect.width();
+    const qreal ry = static_cast<qreal>(m_image.height()) / m_drawRect.height();
+    return QPointF((widgetPos.x() - m_drawRect.x()) * rx,
+                   (widgetPos.y() - m_drawRect.y()) * ry);
 }
 
 QPoint CalibrationDialog::toWidgetCoords(const QPointF& imgPos) const {
-    qreal rx = static_cast<qreal>(m_scaledPixmap.width()) / m_image.width();
-    qreal ry = static_cast<qreal>(m_scaledPixmap.height()) / m_image.height();
-    return QPoint(static_cast<int>(imgPos.x() * rx), static_cast<int>(imgPos.y() * ry));
+    if (m_image.width() < 1 || m_image.height() < 1) return QPoint();
+    const qreal rx = static_cast<qreal>(m_drawRect.width())  / m_image.width();
+    const qreal ry = static_cast<qreal>(m_drawRect.height()) / m_image.height();
+    return QPoint(m_drawRect.x() + static_cast<int>(imgPos.x() * rx),
+                  m_drawRect.y() + static_cast<int>(imgPos.y() * ry));
 }
 
 void CalibrationDialog::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), QColor(40, 40, 40));
-    p.drawPixmap(0, 0, m_scaledPixmap);
+    if (m_scaledPixmap.isNull()) return;
+    p.drawPixmap(m_drawRect.topLeft(), m_scaledPixmap);
     
     if (m_cornerMode) {
         // ── 四角模式：只画四角大锚点和轮廓线 ──
         QPen outlinePen(QColor(0, 200, 100, 180), 2, Qt::DashLine);
         p.setPen(outlinePen);
-        // 四条边: 0=TL 1=TR 2=BL 3=BR
         p.drawLine(toWidgetCoords(m_points[0]), toWidgetCoords(m_points[1])); // 上
         p.drawLine(toWidgetCoords(m_points[1]), toWidgetCoords(m_points[3])); // 右
         p.drawLine(toWidgetCoords(m_points[2]), toWidgetCoords(m_points[3])); // 下
         p.drawLine(toWidgetCoords(m_points[0]), toWidgetCoords(m_points[2])); // 左
         
-        // 预览内插线（用淡色画一些插值网格线，帮助预览效果）
+        // 预览内插线（淡色，帮助预览效果）
         QPointF corners[4] = {m_points[0], m_points[1], m_points[2], m_points[3]};
         QPen previewPen(QColor(0, 200, 100, 50), 1, Qt::DotLine);
         p.setPen(previewPen);
-        int previewRows = 3, previewCols = 3;
+        const int previewRows = 3, previewCols = 3;
+        auto interp = [&](qreal u, qreal v) -> QPointF {
+            return QPointF(
+                (1 - v) * ((1 - u) * corners[0].x() + u * corners[1].x()) + v * ((1 - u) * corners[2].x() + u * corners[3].x()),
+                (1 - v) * ((1 - u) * corners[0].y() + u * corners[1].y()) + v * ((1 - u) * corners[2].y() + u * corners[3].y()));
+        };
         for (int r = 0; r < previewRows; ++r) {
+            const qreal v = r / (previewRows - 1.0);
             for (int c = 0; c < previewCols - 1; ++c) {
-                qreal v = r / (previewRows - 1.0);
-                qreal ua = c / (previewCols - 1.0);
-                qreal ub = (c + 1) / (previewCols - 1.0);
-                auto interp = [&](qreal u, qreal vv) -> QPointF {
-                    return QPointF(
-                        (1 - vv) * ((1 - u) * corners[0].x() + u * corners[1].x()) + vv * ((1 - u) * corners[2].x() + u * corners[3].x()),
-                        (1 - vv) * ((1 - u) * corners[0].y() + u * corners[1].y()) + vv * ((1 - u) * corners[2].y() + u * corners[3].y())
-                    );
-                };
-                p.drawLine(toWidgetCoords(interp(ua, v)), toWidgetCoords(interp(ub, v)));
+                p.drawLine(toWidgetCoords(interp(c / (previewCols - 1.0), v)),
+                           toWidgetCoords(interp((c + 1) / (previewCols - 1.0), v)));
             }
         }
         for (int r = 0; r < previewRows - 1; ++r) {
             for (int c = 0; c < previewCols; ++c) {
-                qreal va = r / (previewRows - 1.0);
-                qreal vb = (r + 1) / (previewRows - 1.0);
-                qreal u = c / (previewCols - 1.0);
-                auto interp = [&](qreal uu, qreal vv) -> QPointF {
-                    return QPointF(
-                        (1 - vv) * ((1 - uu) * corners[0].x() + uu * corners[1].x()) + vv * ((1 - uu) * corners[2].x() + uu * corners[3].x()),
-                        (1 - vv) * ((1 - uu) * corners[0].y() + uu * corners[1].y()) + vv * ((1 - uu) * corners[2].y() + uu * corners[3].y())
-                    );
-                };
-                p.drawLine(toWidgetCoords(interp(u, va)), toWidgetCoords(interp(u, vb)));
+                const qreal u = c / (previewCols - 1.0);
+                p.drawLine(toWidgetCoords(interp(u, r / (previewRows - 1.0))),
+                           toWidgetCoords(interp(u, (r + 1) / (previewRows - 1.0))));
             }
         }
         
         // 四个大锚点
         for (int i = 0; i < 4; ++i) {
-            QPoint wp = toWidgetCoords(m_points[i]);
+            const QPoint wp = toWidgetCoords(m_points[i]);
             p.setPen(Qt::NoPen);
             p.setBrush(QColor(0, 200, 100));
             p.drawEllipse(wp, 7, 7);
@@ -1218,9 +1591,9 @@ void CalibrationDialog::paintEvent(QPaintEvent*) {
         
         // 网格点（四角用绿色高亮）
         for (int i = 0; i < m_rows * m_cols; ++i) {
-            int r = i / m_cols, c = i % m_cols;
-            bool isCorner = (r == 0 || r == m_rows - 1) && (c == 0 || c == m_cols - 1);
-            QPoint wp = toWidgetCoords(m_points[i]);
+            const int r = i / m_cols, c = i % m_cols;
+            const bool isCorner = (r == 0 || r == m_rows - 1) && (c == 0 || c == m_cols - 1);
+            const QPoint wp = toWidgetCoords(m_points[i]);
             p.setPen(Qt::NoPen);
             p.setBrush(isCorner ? QColor(0, 200, 100) : QColor(0, 160, 255));
             p.drawEllipse(wp, 5, 5);
@@ -1229,30 +1602,25 @@ void CalibrationDialog::paintEvent(QPaintEvent*) {
         }
     }
     
-    // 提示
+    // 提示（画在图片下方）
     p.setPen(QColor(200, 200, 200));
     p.setFont(QFont("Microsoft YaHei", 9));
-    int h = m_scaledPixmap.height();
-    QString tip = m_cornerMode
+    const QString tip = m_cornerMode
         ? tr("拖拽绿色四角锚点适配纸面 | 点「精细调整」微调内部")
         : tr("拖拽蓝色锚点微调 | 绿色=四角 | %1×%2 网格").arg(m_rows).arg(m_cols);
-    p.drawText(5, h + 40, tip);
+    p.drawText(8, m_drawRect.bottom() + 18, tip);
 }
 
 void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
     if (ev->button() != Qt::LeftButton) return;
-    QPoint pos = ev->pos();
-    if (pos.y() > m_scaledPixmap.height()) return;  // 忽略按钮区
+    const QPoint pos = ev->pos();
+    if (!m_drawRect.contains(pos)) return;   // 只在图片区域内响应
     
     m_dragIdx = -1;
-    int total = m_rows * m_cols;
+    const int total = m_rows * m_cols;
     for (int i = 0; i < total; ++i) {
-        // 四角模式下只允许拖拽 4 个角
-        if (m_cornerMode) {
-            // 角点索引: 0(TL), 1(TR), 2(BL), 3(BR)
-            if (i != 0 && i != 1 && i != 2 && i != 3) continue;
-        }
-        QPoint wp = toWidgetCoords(m_points[i]);
+        if (m_cornerMode && i != 0 && i != 1 && i != 2 && i != 3) continue;
+        const QPoint wp = toWidgetCoords(m_points[i]);
         if ((pos - wp).manhattanLength() < 14) {
             m_dragIdx = i;
             return;
@@ -1261,12 +1629,11 @@ void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
 }
 
 void CalibrationDialog::mouseMoveEvent(QMouseEvent* ev) {
-    if (m_dragIdx >= 0) {
-        QPoint pos = ev->pos();
-        if (pos.y() > m_scaledPixmap.height()) return;
-        m_points[m_dragIdx] = toImageCoords(pos);
-        update();
-    }
+    if (m_dragIdx < 0) return;
+    const QPoint pos = ev->pos();
+    if (!m_drawRect.contains(pos)) return;
+    m_points[m_dragIdx] = toImageCoords(pos);
+    update();
 }
 
 void CalibrationDialog::mouseReleaseEvent(QMouseEvent*) {
@@ -1363,8 +1730,11 @@ void MainWindow::setupProgressDialog(const QString& title, int maximum) {
     if(m_progressDialog)delete m_progressDialog;
     m_progressDialog=new QProgressDialog(title,tr("取消"),0,maximum,this);
     m_progressDialog->setWindowModality(Qt::WindowModal);
-    m_progressDialog->setCancelButton(nullptr);
-    m_progressDialog->setMinimumDuration(0); m_progressDialog->setValue(0); m_progressDialog->show();
+    m_progressDialog->setMinimumDuration(0); m_progressDialog->setValue(0);
+    // 保留取消按钮：旧实现用 setCancelButton(nullptr) 把它禁掉了，
+    // 高分辨率导出时用户除了强杀进程别无选择
+    connect(m_progressDialog,&QProgressDialog::canceled,this,&MainWindow::requestCancel);
+    m_progressDialog->show();
 }
 
 //=============================================================================
@@ -1400,7 +1770,15 @@ void MainWindow::onMenuFileSave() {
 void MainWindow::showAboutDialog() {
     QMessageBox about(this);
     about.setWindowTitle(tr("关于 HandWrite Generator"));
-    about.setIconPixmap(QPixmap(":/resources/app.ico").scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    // 优先用资源图标；资源缺失时退回窗口图标（不再依赖不存在的 qrc 路径）
+    QPixmap icon(QStringLiteral(":/resources/app.ico"));
+    if (icon.isNull()) icon = windowIcon().pixmap(64, 64);
+    if (icon.isNull()) {
+        const QPixmap fileIcon(QCoreApplication::applicationDirPath() + "/app.ico");
+        if (!fileIcon.isNull()) icon = fileIcon;
+    }
+    if (!icon.isNull())
+        about.setIconPixmap(icon.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     about.setTextFormat(Qt::RichText);
     about.setText(QString(
         "<h3>HandWrite Generator " + QApplication::applicationVersion() + "</h3>"

@@ -14,6 +14,7 @@
 #include <QFile>
 #include <QPen>
 #include <QPointF>
+#include <QSize>
 #include <optional>
 
 namespace HandWrite {
@@ -55,7 +56,7 @@ struct CharacterOverrideRange {
     CharacterOverride override;
 
     bool contains(int index) const {
-        return index >= startIndex && index <= endIndex;
+        return index >= 0 && index >= startIndex && index <= endIndex;
     }
 };
 
@@ -69,20 +70,27 @@ struct StyledSpan {
     QString text;           // 纯文本内容
     int fontSizeOverride = 0; // 0 表示使用默认
     bool strikethrough = false;
+    // 该 span 内首个字符在原文中的索引（-1 = 无对应，如程序插入的换行）
+    // 用于把「渲染索引」正确映射回「原文索引」，避免字符级覆盖错位
+    int origStart = -1;
 };
 
 //=============================================================================
-// 模板参数（大幅扩展）
-//=============================================================================
-//=============================================================================
-// 文字方向
+// 文字方向 / 文字变形
 //=============================================================================
 enum class TextDirection { Horizontal, Vertical };
+enum class TextWarp { None, Arc, Wave, Circle };
 
 //=============================================================================
-// 文字变形模板
+// 单行排版结果
 //=============================================================================
-enum class TextWarp { None, Arc, Wave, Circle };
+struct LineLayout {
+    QString text;                  // 该行的渲染文本（含缩进用全角空格）
+    int fontSizeOverride = 0;      // >0 = 标题字号（未乘 rate 的像素值）
+    std::vector<int> origIndices;  // text[i] 对应原文索引；-1 = 程序插入的缩进字符
+
+    bool isHeading() const { return fontSizeOverride > 0; }
+};
 
 //=============================================================================
 // 背景图片网格校准（NxM 锚点，支持弯曲纸面）
@@ -129,6 +137,7 @@ struct TemplateParams {
     std::string fontPath;
     int fontSize = 30;
     std::vector<std::string> fontMixList; // 混合字体列表（随机切换）
+    double fontMixRate = 0.2;             // 混合字体出现概率 (0~1)
 
     // --- 排版 ---
     int lineSpacing = 70;
@@ -141,6 +150,7 @@ struct TemplateParams {
     int paragraphSpacing = 0;             // 段间距（额外行间距像素）
     TextDirection textDirection = TextDirection::Horizontal;  // 文字方向
     TextWarp textWarp = TextWarp::None;                       // 文字变形模板
+    double textWarpStrength = 1.0;                            // 变形强度倍率
 
     // --- 扰动 ---
     double lineSpacingSigma = 1.0;
@@ -159,15 +169,21 @@ struct TemplateParams {
     double strikeThroughRate = 0.0;       // 划线删除概率 (0~1)
 
     // --- 排版增强 ---
-    bool preserveChinesePunctuation = false;
+    bool preserveChinesePunctuation = true;  // 保留中文标点（false = 转成 ASCII）
 
     // --- 字符 ---
-    std::string startChars = "\"（[<";
-    std::string endChars = "，。！？";
+    // 行尾禁则 / 行首禁则字符集。同时含全角与 ASCII 形式，
+    // 因为 preserveChinesePunctuation=false 时标点会被替换成 ASCII 等价字符
+    std::string startChars = "\"'（([【<“‘";
+    std::string endChars = "。，、；：！？,.!?;:)]}）】>”’";
 
     // --- 颜色 ---
     Color fillColor = Color(0, 0, 0, 255);
     Color backgroundColor = Color(0, 0, 0, 0);
+
+    // --- 复现 ---
+    // 0 = 每次随机；非 0 = 固定种子，保证预览与导出结果完全一致
+    unsigned int seed = 0;
 
     // --- 覆盖 ---
     std::vector<CharacterOverrideRange> charOverrides;
@@ -176,9 +192,16 @@ struct TemplateParams {
 //=============================================================================
 // 单页渲染数据
 //=============================================================================
+// 一行待渲染内容
+struct RenderLine {
+    QString text;
+    QFont font;
+    bool separator = false;   // true = Markdown 分割线，渲染为水平线而非文字
+};
+
 struct PageRenderData {
     int pageIndex;
-    std::vector<std::pair<QString, QFont>> lines;
+    std::vector<RenderLine> lines;
     int scaledWidth;
     int scaledHeight;
     TemplateParams params;
@@ -189,6 +212,11 @@ struct PageRenderData {
     
     // 段落信息：lineIdx -> paragraph index，用于段间距
     std::vector<int> lineParagraphIndex;
+
+    // 已按页面尺寸解码并缩放好的背景图（所有页共享同一份，QImage 隐式共享零拷贝）
+    QImage backgroundImage;
+    // 背景原图尺寸（校准锚点换算需要）
+    QSize backgroundSourceSize;
 };
 
 //=============================================================================
@@ -203,29 +231,55 @@ public:
     TemplateParams& templateParams() { return m_params; }
 
     void modifyTemplateParams(const TemplateParams& params);
-    void setPaperSize(int width, int height);
     void setFont(const std::string& path, int size);
-    void setMargins(int top, int bottom, int left, int right);
-    void setSpacing(int lineSpacing, int wordSpacing);
-    void setColors(const Color& fill, const Color& background);
-    void setPerturbations(double lineSpacing, double fontSize, double wordSpacing,
-                          double perturbX, double perturbY, double perturbTheta);
-    void setRate(int rate);
+
+    // --- 纯文本工具（公开以便单元测试） ---
+    // 中文标点 → ASCII 等价字符
+    static QString convertChinesePunctuation(const QString& text);
+    // Markdown 轻标记解析
+    static std::vector<StyledSpan> parseMarkdown(const QString& text);
+
+    // --- 文本布局（公开以便单元测试） ---
+    // 返回按行切分结果，含每行字号覆盖与「渲染索引 → 原文索引」映射
+    std::vector<LineLayout> layoutText(const QString& text, const QFont& font,
+                                       int maxLineWidth, int scaledLineSpacing,
+                                       int scaledWordSpacing);
+
+    // --- 字符覆盖序列化（GUI 与 CLI 共用，避免重复实现） ---
+    // 格式: start,end,fontSize,perturbX,perturbY,perturbTheta,r,g,b,a（空字段 = 未设置）
+    static std::string serializeCharOverride(const CharacterOverrideRange& r);
+    // 解析失败或全部字段为空时返回 nullopt
+    static std::optional<CharacterOverrideRange> deserializeCharOverride(const std::string& s);
+
+    // --- 内存预算（避免高倍率 OOM） ---
+    static constexpr long long MAX_SINGLE_PAGE_BYTES = 1024LL * 1024 * 1024;   // 单页 1 GB
+    static constexpr long long MAX_TOTAL_BYTES       = 2048LL * 1024 * 1024;   // 峰值 2 GB
+    // 单页峰值字节估算（主画布 + 校准图层 + 背景 + 洇染缓冲 + 竖排旋转）
+    static long long estimateSinglePageBytes(const TemplateParams& params);
+    // 按内存预算收窄线程数
+    static int clampThreadsForBudget(const TemplateParams& params, int requested,
+                                     int pageCount, bool holdAllPages);
+    // 返回 false 表示必然 OOM，message 说明原因与建议
+    static bool checkRenderBudget(const TemplateParams& params, int threadCount, int pageCount,
+                                  bool holdAllPages, std::string* message = nullptr);
+
+    // --- 字体可用性 ---
+    // 返回 false 表示字体文件无法加载（message 给出路径）
+    static bool checkFontAvailable(const std::string& fontPath, std::string* message = nullptr);
 
     // 生成
-    std::map<int, std::string> generateImage(const std::string& text,
-                                              const std::string& outputDir = "outputs");
     std::vector<QImage> generatePreview(const std::string& text);
     std::vector<QImage> generatePreviewParallel(const std::string& text, int threadCount = 0);
     std::map<int, std::string> generateImageParallel(const std::string& text,
                                                       const std::string& outputDir = "outputs",
                                                       int threadCount = 0,
-                                                      std::function<void(int, int)> progressCallback = nullptr);
+                                                      std::function<void(int, int)> progressCallback = nullptr,
+                                                      std::function<bool()> cancelCallback = nullptr);
     
     // PDF 导出
     bool exportPdf(const std::string& text, const std::string& pdfPath);
     
-    // SVG 导出
+    // SVG 导出（多页：首页写 svgPath，其余写 svgPath-2.svg、-3.svg …）
     bool exportSvg(const std::string& text, const std::string& svgPath);
 
     // 渲染和布局
@@ -241,7 +295,6 @@ public:
                                              int contentWidth);
 
     // 生僻字检测
-    std::vector<QChar> findUnsupportedChars(const std::string& text);
     static std::vector<QChar> findUnsupportedCharsStatic(const std::string& text,
                                                           const std::string& fontPath);
 
@@ -255,13 +308,6 @@ private:
     static double gaussianRandomStatic(double sigma, std::mt19937& rng);
     static int gaussianRandomIntStatic(double sigma, std::mt19937& rng);
 
-    // Markdown 解析
-    static std::vector<StyledSpan> parseMarkdown(const QString& text);
-
-    // 文本布局
-    std::vector<std::string> layoutText(const QString& text, const QFont& font,
-                                         int maxLineWidth, int scaledLineSpacing,
-                                         int scaledWordSpacing = 0);
     bool isStartChar(QChar c) const;
     bool isEndChar(QChar c) const;
 
@@ -270,19 +316,40 @@ private:
                                   PaperTexture texture, int rate, double opacity);
 
     // 渲染辅助
+    // warp* 参数用于逐字变形：warpPhaseBase 为行首相位，warpAmplitude/Wavelength 定义波形
     static void drawTextWithPerturbationStatic(QPainter& painter, const QString& text,
                                                 qreal& x, qreal& y, const QFont& baseFont,
                                                 int scaledWordSpacing, const TemplateParams& params,
                                                 std::mt19937& rng,
                                                 int startCharIndex = 0,
-                                                const std::vector<int>* charIndexMap = nullptr);
+                                                const std::vector<int>* charIndexMap = nullptr,
+                                                TextWarp warp = TextWarp::None,
+                                                qreal warpPhaseBase = 0.0,
+                                                qreal warpAmplitude = 0.0,
+                                                qreal warpWavelength = 0.0);
     
     // 墨水洇染效果
     static void applyInkBleed(QImage& image, double radius);
-    
-    // 混合字体选择
-    static QFont pickMixedFont(const QFont& baseFont, 
-                               const std::vector<std::string>& fontMixList);
+
+    // 混合字体选择（使用页面级 rng，保证可复现）
+    static QFont pickMixedFont(const QFont& baseFont,
+                               const std::vector<std::string>& fontMixList,
+                               double mixRate, std::mt19937& rng);
+
+    // 竖排：旋转 90° 后居中裁切到目标尺寸
+    static QImage rotateToVertical(const QImage& src, int targetWidth, int targetHeight);
+
+    // 并行渲染（保留全部页面）
+    static std::vector<QImage> renderPagesParallel(const std::vector<PageRenderData>& pages,
+                                                   int threadCount,
+                                                   const std::function<void(int, int)>& onProgress,
+                                                   const std::function<bool()>& isCanceled);
+    // 并行渲染并直接落盘（逐页释放，峰值 = 线程数 × 单页）
+    static std::map<int, std::string> renderAndSaveParallel(const std::vector<PageRenderData>& pages,
+                                                            const std::string& outputDir,
+                                                            int threadCount,
+                                                            const std::function<void(int, int)>& onProgress,
+                                                            const std::function<bool()>& isCanceled);
 };
 
 } // namespace HandWrite

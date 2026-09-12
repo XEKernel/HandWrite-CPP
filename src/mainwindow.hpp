@@ -13,12 +13,13 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <functional>
+#include <atomic>
+#include <memory>
 #include <QPixmap>
 #include <QProgressDialog>
 #include <QFutureWatcher>
 #include <QtConcurrent>
 #include <QWheelEvent>
-#include <QDialog>
 #include <QSpinBox>
 #include <QDoubleSpinBox>
 #include <QCheckBox>
@@ -40,6 +41,19 @@ QT_END_NAMESPACE
 
 namespace HandWrite {
 
+//=============================================================================
+// 后台渲染结果（携带错误信息，避免用异常跨线程传递）
+//=============================================================================
+struct RenderOutcome {
+    std::vector<QImage> images;
+    QString error;
+};
+
+struct ExportOutcome {
+    std::map<int, std::string> files;
+    QString error;
+};
+
 class CharacterOverrideDialog : public QDialog {
     Q_OBJECT
 public:
@@ -60,6 +74,22 @@ private:
 };
 
 //=============================================================================
+// 字体混合选择对话框
+//=============================================================================
+class FontMixDialog : public QDialog {
+    Q_OBJECT
+public:
+    FontMixDialog(const std::vector<std::string>& fontNames,
+                  const std::vector<std::string>& fontPaths,
+                  const std::vector<std::string>& selected,
+                  QWidget* parent = nullptr);
+    std::vector<std::string> selectedPaths() const;
+private:
+    QListWidget* m_list;
+    std::vector<std::string> m_fontPaths;
+};
+
+//=============================================================================
 // 背景图片网格校准对话框
 //=============================================================================
 class CalibrationDialog : public QDialog {
@@ -67,18 +97,23 @@ class CalibrationDialog : public QDialog {
 public:
     explicit CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent = nullptr);
     BackgroundCalibration getCalibration() const;
-private:
+protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
+private:
     QPointF toImageCoords(const QPoint& widgetPos) const;
     QPoint toWidgetCoords(const QPointF& imgPos) const;
     void buildUniformGrid();
     void applyMode(bool cornerMode, int newRows = 3, int newCols = 3);
+    void relayoutCanvas();
 
     QImage m_image;
     QPixmap m_scaledPixmap;
+    QWidget* m_canvas = nullptr;      // 图片绘制区（交给布局管理，避免绝对定位）
+    QRect m_drawRect;                 // 图片在对话框内的实际绘制矩形
     int m_rows, m_cols;
     std::vector<QPointF> m_points;  // 行主序，图片坐标
     int m_dragIdx = -1;
@@ -104,6 +139,7 @@ private slots:
     // 按钮
     void onPushButtonPreviewClicked();
     void onPushButtonExportClicked();
+    void onPushButtonExportSvgClicked();
     void onPushButtonPrintClicked();
     void onPushButtonExportPdfClicked();
     void onPushButtonSaveConfigClicked();
@@ -113,6 +149,8 @@ private slots:
     void onPushButtonSelectBgImageClicked();
     void onPushButtonClearBgImageClicked();
     void onPushButtonCalibrateBgClicked();
+    void onPushButtonFontMixClicked();
+    void onPushButtonNewSeedClicked();
     void showAboutDialog();
     void onMenuFileNew();
     void onMenuFileOpen();
@@ -158,13 +196,15 @@ private:
     double m_zoomFactor = 1.0;
     static constexpr double ZOOM_MIN = 0.1, ZOOM_MAX = 5.0, ZOOM_STEP = 0.1;
     
-    QFutureWatcher<std::vector<QImage>> *m_previewWatcher;
-    QFutureWatcher<std::map<int, std::string>> *m_exportWatcher;
+    QFutureWatcher<RenderOutcome> *m_previewWatcher;
+    QFutureWatcher<ExportOutcome> *m_exportWatcher;
     QProgressDialog *m_progressDialog;
-    int m_exportRate = 4;
+    // 主线程与渲染线程共享的取消标志（true = 用户已取消）
+    std::shared_ptr<std::atomic<bool>> m_cancelFlag;
     
     std::vector<CharacterOverrideRange> m_charOverrides;
     std::vector<std::string> m_cachedFontNames, m_cachedFontPaths;
+    std::vector<std::string> m_fontMixPaths;
     
     // 自动预览
     QTimer *m_autoPreviewTimer;
@@ -181,6 +221,11 @@ private:
     QDoubleSpinBox *m_spinInkBleedRadius;
     QDoubleSpinBox *m_spinStrikeThroughRate;
     QDoubleSpinBox *m_spinStrokeWidthSigma;
+    QCheckBox *m_checkPreservePunct;
+    QDoubleSpinBox *m_spinTextWarpStrength;
+    QDoubleSpinBox *m_spinFontMixRate;
+    QLabel *m_labelFontMix;
+    QLineEdit *m_lineEditSeed;
     QLabel *m_labelBgImage;
     BackgroundCalibration m_bgCalibration;
     QString m_bgImagePath;
@@ -198,14 +243,19 @@ private:
     void goToPage(int page);
     void updateZoomDisplay(); void applyZoom();
     void updateCharOverrideLabel();
+    void updateFontMixLabel();
+    void requestCancel();
     
-    std::vector<QImage> generatePreviewAsync(TemplateParams params, QString text, int previewRate);
-    std::map<int, std::string> generateExportAsync(TemplateParams params, QString text, QString outputDir);
+    RenderOutcome generatePreviewAsync(TemplateParams params, QString text, int previewRate);
+    ExportOutcome generateExportAsync(TemplateParams params, QString text, QString outputDir);
     void onPreviewFinished(); void onExportFinished();
     void setupProgressDialog(const QString &title, int maximum = 0);
     
     TemplateParams getParamsFromForm();
     QString getTextFromTextEdit();
+    // 渲染前检查「单页」内存是否超硬上限；超限时提示用户并返回 false
+    // （页数相关的峰值检查在引擎内部完成，错误通过 RenderOutcome::error 回传）
+    bool guardRenderBudget(const TemplateParams& params);
     
     void saveConfiguration(const QString &path);
     void loadConfiguration(const QString &path);

@@ -18,7 +18,16 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
+      # fetch-depth: 0 —— 生成 Release 说明需要读到上一个 tag 与完整提交历史
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        id: py
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
@@ -46,25 +55,47 @@ jobs:
           cd build
           ninja
 
+      - name: Run unit tests
+        run: |
+          cd build
+          ctest --output-on-failure
+
       - name: Deploy Qt DLLs
         run: |
           cd build
           windeployqt HandWrite.exe --no-translations --no-system-d3d-compiler
 
+      # 只拷真正被链接到的 DLL（按 PE 导入表递归求闭包），
+      # 而不是把整个 MSYS2 运行时（约 256MB）全塞进发布包。
+      # 脚本一旦失败就回退到旧做法，保证发布不被卡住。
+      # 注意：/ucrt64/bin 是 MSYS2 内部路径，必须用 cygpath 转给 Windows 版 Python。
       - name: Copy runtime DLLs
         run: |
           cd build
-          cp /ucrt64/bin/*.dll . 2>/dev/null || true
-          cp -r ../ttf_library . 2>/dev/null || true
-          echo "[Paths]" > qt.conf
-          echo "Prefix = ." >> qt.conf
-          echo "Plugins = plugins" >> qt.conf
+          PY="${{ steps.py.outputs.python-path }}"
+          UCRT="$(cygpath -w /ucrt64/bin)"
+          if "$PY" ../.github/scripts/collect_dlls.py . "$UCRT"; then
+            echo "DLL 闭包分析成功"
+          else
+            echo "::warning::DLL 闭包分析失败，回退到整包拷贝"
+            cp /ucrt64/bin/*.dll . 2>/dev/null || true
+          fi
+
+      - name: Write qt.conf
+        run: |
+          cd build
+          printf '[Paths]\nPrefix = .\nPlugins = plugins\n' > qt.conf
 
       - name: Package release
         shell: pwsh
         run: |
           cd build
-          Compress-Archive -Path HandWrite.exe,handwrite-cli.exe,qt.conf,*.dll,ttf_library,platforms,imageformats,styles,tls -CompressionLevel Optimal -DestinationPath ../HandWrite-${{ github.ref_name }}-windows-x64.zip -Force
+          $items = @('HandWrite.exe', 'handwrite-cli.exe', 'qt.conf',
+                     'ttf_library', 'platforms', 'imageformats', 'styles', 'tls') |
+                   Where-Object { Test-Path $_ }
+          $items += (Get-ChildItem -Path . -Filter *.dll -File | ForEach-Object { $_.Name })
+          Compress-Archive -Path $items -CompressionLevel Optimal `
+            -DestinationPath ../HandWrite-${{ github.ref_name }}-windows-x64.zip -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -86,32 +117,21 @@ jobs:
           name: HandWrite-Windows-Zip
           path: HandWrite-${{ github.ref_name }}-windows-x64.zip
 
+      # Release 正文 = CHANGELOG.md 里该版本的段落 + 上一个 tag 以来的提交列表 + 下载说明
+      - name: Generate release notes
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          "${{ steps.py.outputs.python-path }}" .github/scripts/release_notes.py "${{ github.ref_name }}"
+          echo "----- release notes -----"
+          cat release_notes.md
+
       - name: Create Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: HandWrite ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          body: |
-            ## HandWrite ${{ github.ref_name }}
-
-            ### New Features
-            - 6 paper textures (horizontal line, grid, tianzige, composition, dot grid)
-            - Ink bleed, stroke width variation, strikethrough simulation
-            - Real-time auto-preview with debounce timer
-            - PDF export
-            - Multi-preset management (save/load/delete)
-            - Paragraph indent & spacing
-            - Markdown light parsing (# headings, ~~strikethrough~~, --- separator)
-            - Font mixing, background image overlay
-            - CLI mode (handwrite-cli)
-            - Dynamic UI
-
-            ### Bug Fixes
-            - Use-after-free, null pointer crash, font path mismatch
-            - Paper template selector ordering
-            - Character override, perturbed font spacing, line spacing consistency
-            - Code duplication, input validation, config parsing
+          body_path: release_notes.md
           files: HandWrite-${{ github.ref_name }}-windows-x64.zip
           draft: false
           prerelease: false

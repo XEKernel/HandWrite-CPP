@@ -1,0 +1,33 @@
+# HandWrite 代码风格（沿用现有代码的写法，避免一次性大范围重排）
+# 使用：clang-format -i src/*.cpp src/*.hpp tests/*.cpp
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+Standard: c++17
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# 现网代码是「指针靠右」：QWidget *parent
+PointerAlignment: Right
+DerivePointerAlignment: false
+
+# 函数花括号不换行，与控制语句一致
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: true
+
+# 头文件顺序交给人工维护（Qt 头文件有约定俗成的分组）
+SortIncludes: false
+
+# 连续赋值 / 声明对齐不强制
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+SpaceAfterTemplateKeyword: false
+Cpp11BracedListStyle: true
