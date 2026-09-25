@@ -47,9 +47,15 @@
   （每字符 save/translate/rotate/drawText/restore），所以"逐字沿曲线"改造量很小。
 - 锚点与 guide 分工正交：锚点管页面四角几何（低频透视），guide 管每行曲线（高频弯曲）。
 - 交互关键：**手绘 2 条关键曲线 + 填条数 → 弧长参数插值**出中间线，成本从 20 条降到 2~3 条。
-- **批次 1 已完成（2026-09-25，v2.8.0）**：引擎 + 配置 + CLI 预设读取，零告警，ctest 152/152，
-  端到端验证通过（文字沿弯曲横线排布 + 正确翻页）。**批次 2（手绘 UI）未开工**，
-  目前只能通过预设文件的 `line_guide_*` 配置使用。代码未提交。
+- **批次 1+2 已完成（2026-09-25，v2.8.0）**：渲染引擎 + 配置 + CLI 预设读取 + 手绘 UI
+  （`ImageCanvasDialog` 基类、`LineGuideDialog` 拖动描线/平滑/放大镜/撤销、主窗口「横线...」按钮）。
+  零告警，ctest 152/152，端到端验证通过（文字沿弯曲横线排布 + 正确翻页），
+  offscreen 截图确认 UI 布局与锚点对话框无回归。**批次 3（水平透视补偿）/ 批次 4（自动检测）未开工**。
+- ⭐ **GUI 自动化验证套路**：临时 CMake 工程链接 `mainwindow.cpp`，`QT_QPA_PLATFORM=offscreen`
+  + `QTimer::singleShot(400, [&]{ w->grab().save(png); })` 渲染成 PNG 人工检查。
+  AUTOUIC 记得把 `ui/mainwindow.ui` 加进 target。
+- ⭐ **LineGuideDialog 正确性关键**：关键曲线必须**按垂直位置排序**再插值 ——
+  插值在空间相邻的两条之间做，用户描线先后顺序不能决定分段。
 - ⭐ **robocopy 陷阱**：Git Bash 里必须 `MSYS_NO_PATHCONV=1 robocopy ...`，
   否则 `/MIR` `/XD` 被 MSYS 路径转换破坏，robocopy 静默失败 → 构建的是旧代码还以为同步成功。
   同步后必须 grep 目标文件确认含新符号。

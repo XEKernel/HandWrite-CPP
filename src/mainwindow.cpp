@@ -32,6 +32,7 @@
 #include <QRegularExpression>
 #include <QRandomGenerator>
 #include <QResizeEvent>
+#include <QLineF>
 #include <algorithm>
 #include <sstream>
 #include <optional>
@@ -265,11 +266,16 @@ void MainWindow::setupDynamicUi() {
     auto *btnCalibrateBg = new QPushButton(tr("锚点"), bgGroup);
     btnCalibrateBg->setToolTip(tr("设置文字在背景图片上的显示区域"));
     connect(btnCalibrateBg, &QPushButton::clicked, this, &MainWindow::onPushButtonCalibrateBgClicked);
+    auto *btnLineGuide = new QPushButton(tr("横线..."), bgGroup);
+    btnLineGuide->setToolTip(tr("沿作业本上的印刷横线描线，让文字排布在横线内\n"
+                                "（纸张弯曲时横线是弯的，需先标定锚点再描线）"));
+    connect(btnLineGuide, &QPushButton::clicked, this, &MainWindow::onPushButtonLineGuideClicked);
     m_labelBgImage = new QLabel(tr("未设置"), bgGroup);
     m_labelBgImage->setWordWrap(true);
     bgLayout->addWidget(btnSelectBg);
     bgLayout->addWidget(btnClearBg);
     bgLayout->addWidget(btnCalibrateBg);
+    bgLayout->addWidget(btnLineGuide);
     bgLayout->addWidget(m_labelBgImage, 1);
     
     // 排版设置
@@ -919,6 +925,8 @@ void MainWindow::onPushButtonClearBgImageClicked() {
     m_bgImagePath.clear();
     m_labelBgImage->setText(tr("未设置"));
     m_bgCalibration = BackgroundCalibration{};
+    // 横线导引是绑定在背景图上的（存的是原图坐标），背景没了它也就没有意义
+    m_lineGuides = LineGuideSet{};
     onParameterChanged();
 }
 
@@ -930,6 +938,30 @@ void MainWindow::onPushButtonCalibrateBgClicked() {
     CalibrationDialog dlg(m_bgImagePath, m_bgCalibration, this);
     if (dlg.exec() == QDialog::Accepted) {
         m_bgCalibration = dlg.getCalibration();
+        onParameterChanged();
+    }
+}
+
+void MainWindow::onPushButtonLineGuideClicked() {
+    if (m_bgImagePath.isEmpty()) {
+        QMessageBox::warning(this, tr("提示"), tr("请先选择背景图片"));
+        return;
+    }
+    // 流程上建议先标定锚点：锚点给页面四角几何，横线给每行的弯曲。
+    // 但不强制 —— 正拍的照片不需要锚点也能描线。
+    if (!m_bgCalibration.isValid()) {
+        const auto ret = QMessageBox::question(
+            this, tr("尚未标定锚点"),
+            tr("还没有用「锚点」标定页面四角。\n\n"
+               "锚点决定文字块的边界与整体透视，横线决定每一行走哪条曲线，两者配合效果最好。\n"
+               "正对着拍的照片可以跳过，继续吗？"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+        if (ret != QMessageBox::Yes) return;
+    }
+
+    LineGuideDialog dlg(m_bgImagePath, m_lineGuides, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        m_lineGuides = dlg.getGuides();
         onParameterChanged();
     }
 }
@@ -1304,16 +1336,84 @@ void MainWindow::onComboBoxPaperTemplateCurrentIndexChanged(int) {
 // 全部改用真实布局：旧实现用 setGeometry + setFixedSize 绝对定位按钮，
 // 在系统缩放/字体放大时按钮会重叠、标签会跑位。
 
-CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent)
-    : QDialog(parent), m_rows(3), m_cols(3) {
-    setWindowTitle(tr("网格校准 — 拖拽四角锚点适配纸面"));
+//=============================================================================
+// 图片画布对话框基类
+//=============================================================================
+
+ImageCanvasDialog::ImageCanvasDialog(QWidget* parent) : QDialog(parent) {
     setMinimumSize(480, 400);
-    resize(840, 640);
-    
-    // 使用统一加载器（含 WebP 回退）
+}
+
+bool ImageCanvasDialog::loadCanvasImage(const QString& imagePath) {
+    // 统一加载器（含 WebP 回退）
     m_image = loadImageWithWebpFallback(imagePath.toStdString());
     if (m_image.isNull()) {
         QMessageBox::warning(this, tr("错误"), tr("无法加载背景图片（格式不支持或文件损坏）"));
+        return false;
+    }
+    return true;
+}
+
+void ImageCanvasDialog::installCanvas(QVBoxLayout* root, int minHeight) {
+    m_canvas = new QWidget(this);
+    m_canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_canvas->setMinimumHeight(minHeight);
+    // 鼠标事件穿透到对话框，命中测试统一在对话框里做
+    m_canvas->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    root->addWidget(m_canvas, 1);
+    setMouseTracking(true);
+}
+
+void ImageCanvasDialog::relayoutCanvas() {
+    if (!m_canvas || m_image.isNull()) return;
+    const QRect area = m_canvas->geometry();
+    if (area.width() < 2 || area.height() < 2) return;
+
+    const qreal scale = std::min(static_cast<qreal>(area.width())  / m_image.width(),
+                                 static_cast<qreal>(area.height()) / m_image.height());
+    const int w = std::max(1, static_cast<int>(m_image.width()  * scale));
+    const int h = std::max(1, static_cast<int>(m_image.height() * scale));
+    m_scaledPixmap = QPixmap::fromImage(m_image.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    m_drawRect = QRect(area.x() + (area.width()  - m_scaledPixmap.width())  / 2,
+                       area.y() + (area.height() - m_scaledPixmap.height()) / 2,
+                       m_scaledPixmap.width(), m_scaledPixmap.height());
+    update();
+}
+
+QPointF ImageCanvasDialog::toImageCoords(const QPoint& widgetPos) const {
+    if (m_drawRect.width() < 1 || m_drawRect.height() < 1) return QPointF();
+    const qreal rx = static_cast<qreal>(m_image.width())  / m_drawRect.width();
+    const qreal ry = static_cast<qreal>(m_image.height()) / m_drawRect.height();
+    return QPointF((widgetPos.x() - m_drawRect.x()) * rx,
+                   (widgetPos.y() - m_drawRect.y()) * ry);
+}
+
+QPoint ImageCanvasDialog::toWidgetCoords(const QPointF& imgPos) const {
+    if (m_image.width() < 1 || m_image.height() < 1) return QPoint();
+    const qreal rx = static_cast<qreal>(m_drawRect.width())  / m_image.width();
+    const qreal ry = static_cast<qreal>(m_drawRect.height()) / m_image.height();
+    return QPoint(m_drawRect.x() + static_cast<int>(imgPos.x() * rx),
+                  m_drawRect.y() + static_cast<int>(imgPos.y() * ry));
+}
+
+void ImageCanvasDialog::drawCanvasTip(QPainter& p, const QString& tip) {
+    p.setPen(QColor(200, 200, 200));
+    p.setFont(QFont(QStringLiteral("Microsoft YaHei"), 9));
+    p.drawText(8, m_drawRect.bottom() + 18, tip);
+}
+
+void ImageCanvasDialog::resizeEvent(QResizeEvent*) { relayoutCanvas(); }
+
+//=============================================================================
+// 背景图片校准对话框（锚点）
+//=============================================================================
+
+CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundCalibration& calib, QWidget* parent)
+    : ImageCanvasDialog(parent), m_rows(3), m_cols(3) {
+    setWindowTitle(tr("网格校准 — 拖拽四角锚点适配纸面"));
+    resize(840, 640);
+
+    if (!loadCanvasImage(imagePath)) {
         QMetaObject::invokeMethod(this, [this]() { reject(); }, Qt::QueuedConnection);
         return;
     }
@@ -1333,12 +1433,7 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     root->setContentsMargins(8, 8, 8, 8);
     root->setSpacing(6);
     
-    m_canvas = new QWidget(this);
-    m_canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_canvas->setMinimumHeight(240);
-    // 鼠标事件穿透到对话框，统一在对话框里做命中测试
-    m_canvas->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    root->addWidget(m_canvas, 1);
+    installCanvas(root, 240);
     
     auto* btnBar = new QWidget(this);
     auto* bl = new QHBoxLayout(btnBar);
@@ -1438,24 +1533,6 @@ CalibrationDialog::CalibrationDialog(const QString& imagePath, const BackgroundC
     setMouseTracking(true);
 }
 
-void CalibrationDialog::resizeEvent(QResizeEvent*) { relayoutCanvas(); }
-
-void CalibrationDialog::relayoutCanvas() {
-    if (!m_canvas || m_image.isNull()) return;
-    const QRect area = m_canvas->geometry();
-    if (area.width() < 2 || area.height() < 2) return;
-    
-    const qreal scale = std::min(static_cast<qreal>(area.width())  / m_image.width(),
-                                 static_cast<qreal>(area.height()) / m_image.height());
-    const int w = std::max(1, static_cast<int>(m_image.width()  * scale));
-    const int h = std::max(1, static_cast<int>(m_image.height() * scale));
-    m_scaledPixmap = QPixmap::fromImage(m_image.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    m_drawRect = QRect(area.x() + (area.width()  - m_scaledPixmap.width())  / 2,
-                       area.y() + (area.height() - m_scaledPixmap.height()) / 2,
-                       m_scaledPixmap.width(), m_scaledPixmap.height());
-    update();
-}
-
 void CalibrationDialog::applyMode(bool cornerMode, int newRows, int newCols) {
     if (cornerMode) {
         // 如果当前是精细模式，从当前网格提取四角
@@ -1531,22 +1608,6 @@ BackgroundCalibration CalibrationDialog::getCalibration() const {
         c.gridPoints = m_points;
     }
     return c;
-}
-
-QPointF CalibrationDialog::toImageCoords(const QPoint& widgetPos) const {
-    if (m_drawRect.width() < 1 || m_drawRect.height() < 1) return QPointF();
-    const qreal rx = static_cast<qreal>(m_image.width())  / m_drawRect.width();
-    const qreal ry = static_cast<qreal>(m_image.height()) / m_drawRect.height();
-    return QPointF((widgetPos.x() - m_drawRect.x()) * rx,
-                   (widgetPos.y() - m_drawRect.y()) * ry);
-}
-
-QPoint CalibrationDialog::toWidgetCoords(const QPointF& imgPos) const {
-    if (m_image.width() < 1 || m_image.height() < 1) return QPoint();
-    const qreal rx = static_cast<qreal>(m_drawRect.width())  / m_image.width();
-    const qreal ry = static_cast<qreal>(m_drawRect.height()) / m_image.height();
-    return QPoint(m_drawRect.x() + static_cast<int>(imgPos.x() * rx),
-                  m_drawRect.y() + static_cast<int>(imgPos.y() * ry));
 }
 
 void CalibrationDialog::paintEvent(QPaintEvent*) {
@@ -1629,12 +1690,9 @@ void CalibrationDialog::paintEvent(QPaintEvent*) {
     }
     
     // 提示（画在图片下方）
-    p.setPen(QColor(200, 200, 200));
-    p.setFont(QFont("Microsoft YaHei", 9));
-    const QString tip = m_cornerMode
+    drawCanvasTip(p, m_cornerMode
         ? tr("拖拽绿色四角锚点适配纸面 | 点「精细调整」微调内部")
-        : tr("拖拽蓝色锚点微调 | 绿色=四角 | %1×%2 网格").arg(m_rows).arg(m_cols);
-    p.drawText(8, m_drawRect.bottom() + 18, tip);
+        : tr("拖拽蓝色锚点微调 | 绿色=四角 | %1×%2 网格").arg(m_rows).arg(m_cols));
 }
 
 void CalibrationDialog::mousePressEvent(QMouseEvent* ev) {
@@ -1664,6 +1722,525 @@ void CalibrationDialog::mouseMoveEvent(QMouseEvent* ev) {
 
 void CalibrationDialog::mouseReleaseEvent(QMouseEvent*) {
     m_dragIdx = -1;
+}
+
+//=============================================================================
+// 横线导引对话框（作业本横线）
+//=============================================================================
+// 设计要点：
+//   · 纸张弯曲 → 横线是曲线，只能手绘（鼠标按住拖动采点）
+//   · 为降低操作成本，只要求描 2 条关键曲线（首、尾），中间按弧长参数插值
+//   · 关键曲线按「垂直位置」排序后插值，所以用户画的先后顺序无关紧要
+//   · 采样按像素间距抽稀，松手后做移动平均平滑
+
+namespace {
+
+// 采点抽稀间距（图片坐标下的像素，会按当前缩放换算）
+constexpr qreal kSampleMinDist = 3.0;
+// 端点命中半径（widget 像素）
+constexpr int kHandleHitRadius = 12;
+// 放大镜边长与放大倍数
+constexpr int kMagnifierSize = 132;
+constexpr qreal kMagnifierZoom = 3.0;
+
+QPointF curveCentroidY(const GuideCurve& c) {
+    if (c.pts.empty()) return QPointF();
+    qreal sum = 0.0;
+    for (const QPointF& p : c.pts) sum += p.y();
+    return QPointF(0, sum / static_cast<qreal>(c.pts.size()));
+}
+
+} // namespace
+
+LineGuideDialog::LineGuideDialog(const QString& imagePath, const LineGuideSet& guides, QWidget* parent)
+    : ImageCanvasDialog(parent) {
+    setWindowTitle(tr("横线导引 — 沿作业本上的横线拖动描线"));
+    resize(940, 760);
+
+    if (!loadCanvasImage(imagePath)) {
+        QMetaObject::invokeMethod(this, [this]() { reject(); }, Qt::QueuedConnection);
+        return;
+    }
+
+    // 恢复已有配置
+    m_keyCurves  = guides.keyCurves;
+    m_lineCount  = qBound(2, guides.lineCount, 200);
+    m_interpolate = guides.useInterpolation;
+
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(8, 8, 8, 8);
+    root->setSpacing(6);
+
+    installCanvas(root, 300);
+
+    // ── 操作栏 ──
+    auto* bar = new QWidget(this);
+    auto* bl = new QHBoxLayout(bar);
+    bl->setContentsMargins(0, 0, 0, 0);
+    bl->setSpacing(5);
+
+    auto mkBtn = [&](const QString& text, const QString& tip) {
+        auto* b = new QPushButton(text, bar);
+        b->setToolTip(tip);
+        bl->addWidget(b);
+        return b;
+    };
+
+    m_btnFirst  = mkBtn(tr("画第 1 条"),   tr("在照片上按住鼠标，沿最上面那条横线拖动"));
+    m_btnLast   = mkBtn(tr("画最后 1 条"), tr("在照片上按住鼠标，沿最下面那条横线拖动"));
+    m_btnExtra  = mkBtn(tr("+ 关键线"),    tr("再补一条关键曲线（纸张中间鼓/凹时用，会变成分段插值）"));
+    bl->addSpacing(8);
+    m_btnRedraw = mkBtn(tr("重画选中"),    tr("删除选中的关键曲线并重新描一条"));
+    m_btnDelete = mkBtn(tr("删除选中"),    tr("删除选中的关键曲线（Delete 键同效）"));
+    m_btnUndo   = mkBtn(tr("撤销"),        tr("回退上一步曲线编辑"));
+    m_btnClear  = mkBtn(tr("清空"),        tr("清空所有关键曲线"));
+
+    bl->addStretch();
+    m_lblStatus = new QLabel(bar);
+    m_lblStatus->setMinimumWidth(260);
+    m_lblStatus->setStyleSheet(QStringLiteral("color:#9cf;"));
+    bl->addWidget(m_lblStatus);
+
+    root->addWidget(bar, 0);
+
+    // ── 参数栏 ──
+    auto* pbar = new QWidget(this);
+    auto* pl = new QHBoxLayout(pbar);
+    pl->setContentsMargins(0, 0, 0, 0);
+    pl->setSpacing(8);
+
+    pl->addWidget(new QLabel(tr("条数:"), pbar));
+    m_spinCount = new QSpinBox(pbar);
+    m_spinCount->setRange(2, 200);
+    m_spinCount->setValue(m_lineCount);
+    m_spinCount->setToolTip(tr("整页横线的总条数（含首尾关键曲线）。中间条数由插值生成"));
+    pl->addWidget(m_spinCount);
+
+    m_checkInterp = new QCheckBox(tr("关键曲线间自动插值"), pbar);
+    m_checkInterp->setChecked(m_interpolate);
+    m_checkInterp->setToolTip(tr("勾选：只描 2~3 条，其余自动生成\n不勾：手绘几条就用几条"));
+    pl->addWidget(m_checkInterp);
+
+    pl->addSpacing(10);
+    pl->addWidget(new QLabel(tr("基线位置:"), pbar));
+    m_sliderRatio = new QSlider(Qt::Horizontal, pbar);
+    m_sliderRatio->setRange(0, 100);
+    m_sliderRatio->setValue(static_cast<int>(guides.baselineRatio * 100));
+    m_sliderRatio->setMinimumWidth(140);
+    m_sliderRatio->setToolTip(tr("0 = 字贴在两条横线中的上一条\n100 = 贴在下一条\n手写习惯一般在 80 左右"));
+    pl->addWidget(m_sliderRatio);
+    m_lblRatio = new QLabel(QString::number(guides.baselineRatio, 'f', 2), pbar);
+    m_lblRatio->setMinimumWidth(34);
+    pl->addWidget(m_lblRatio);
+
+    pl->addWidget(new QLabel(tr("微调:"), pbar));
+    m_spinOffset = new QSpinBox(pbar);
+    m_spinOffset->setRange(-200, 200);
+    m_spinOffset->setValue(guides.baselineOffset);
+    m_spinOffset->setSuffix(tr(" px"));
+    pl->addWidget(m_spinOffset);
+
+    pl->addSpacing(10);
+    m_checkFollow = new QCheckBox(tr("逐字跟随弯曲"), pbar);
+    m_checkFollow->setChecked(guides.followCurve);
+    m_checkFollow->setToolTip(tr("勾选：行内每个字按曲线定位并跟随切线角旋转\n不勾：整行拉平（弯曲过度导致字形怪异时可关）"));
+    pl->addWidget(m_checkFollow);
+
+    pl->addWidget(new QLabel(tr("每行占"), pbar));
+    m_spinPerRow = new QSpinBox(pbar);
+    m_spinPerRow->setRange(1, 4);
+    m_spinPerRow->setValue(qBound(1, guides.linesPerRow, 4));
+    m_spinPerRow->setToolTip(tr("一行文字占几条横线的高度。线距小于字号时调大"));
+    pl->addWidget(m_spinPerRow);
+    pl->addWidget(new QLabel(tr("条线"), pbar));
+
+    pl->addStretch();
+
+    root->addWidget(pbar, 0);
+
+    // ── 提示条 ──
+    auto* hint = new QLabel(this);
+    hint->setWordWrap(true);
+    hint->setStyleSheet(QStringLiteral("color:#aaa; background:#2a2a2a; border-radius:4px; padding:4px 8px;"));
+    hint->setText(tr("提示：先用「锚点」标定页面四角，再回来画横线。"
+                     "纸张弯曲时横线是弯的 —— 按住鼠标沿横线拖过去即可，松手会自动平滑。"
+                     "只需画第 1 条和最后 1 条，中间自动插值。"));
+    root->addWidget(hint, 0);
+
+    // ── 确定 / 取消 ──
+    auto* okBar = new QWidget(this);
+    auto* ol = new QHBoxLayout(okBar);
+    ol->setContentsMargins(0, 0, 0, 0);
+    ol->addStretch();
+    auto* btnOk = new QPushButton(tr("确定"), okBar);
+    btnOk->setDefault(true);
+    auto* btnCancel = new QPushButton(tr("取消"), okBar);
+    ol->addWidget(btnOk);
+    ol->addWidget(btnCancel);
+    root->addWidget(okBar, 0);
+
+    // ── 连接 ──
+    connect(m_btnFirst, &QPushButton::clicked, this, [this]() { beginDraw(-1); });
+    connect(m_btnLast,  &QPushButton::clicked, this, [this]() { beginDraw(-1); });
+    connect(m_btnExtra, &QPushButton::clicked, this, [this]() { beginDraw(-1); });
+    connect(m_btnRedraw, &QPushButton::clicked, this, [this]() {
+        if (m_selCurve < 0) { m_lblStatus->setText(tr("请先在图中点选一条关键曲线")); return; }
+        beginDraw(m_selCurve);
+    });
+    connect(m_btnDelete, &QPushButton::clicked, this, [this]() {
+        if (m_selCurve < 0) { m_lblStatus->setText(tr("请先在图中点选一条关键曲线")); return; }
+        pushUndo();
+        m_keyCurves.erase(m_keyCurves.begin() + m_selCurve);
+        m_selCurve = -1;
+        refresh();
+    });
+    connect(m_btnClear, &QPushButton::clicked, this, [this]() {
+        if (m_keyCurves.empty()) return;
+        pushUndo();
+        m_keyCurves.clear();
+        m_selCurve = -1;
+        refresh();
+    });
+    connect(m_btnUndo, &QPushButton::clicked, this, [this]() {
+        if (m_undo.empty()) { m_lblStatus->setText(tr("没有可撤销的操作")); return; }
+        m_keyCurves = m_undo.back();
+        m_undo.pop_back();
+        m_selCurve = -1;
+        m_drawing = false;
+        refresh();
+    });
+
+    connect(m_spinCount, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
+        m_lineCount = v; refresh();
+    });
+    connect(m_checkInterp, &QCheckBox::toggled, this, [this](bool v) {
+        m_interpolate = v; refresh();
+    });
+    connect(m_sliderRatio, &QSlider::valueChanged, this, [this](int v) {
+        m_lblRatio->setText(QString::number(v / 100.0, 'f', 2));
+    });
+    connect(btnOk, &QPushButton::clicked, this, &QDialog::accept);
+    connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);
+
+    refresh();
+}
+
+void LineGuideDialog::pushUndo() {
+    m_undo.push_back(m_keyCurves);
+    // 限制栈深度，避免手绘很多条时内存无谓增长
+    if (m_undo.size() > 32) m_undo.erase(m_undo.begin());
+}
+
+void LineGuideDialog::sortKeyCurves() {
+    // 插值按「上→下」顺序在两两之间进行，所以必须按垂直位置排序，
+    // 用户描线的先后顺序不能决定它属于哪一段。
+    std::stable_sort(m_keyCurves.begin(), m_keyCurves.end(),
+                     [](const GuideCurve& a, const GuideCurve& b) {
+                         return curveCentroidY(a).y() < curveCentroidY(b).y();
+                     });
+}
+
+void LineGuideDialog::refresh() {
+    sortKeyCurves();
+
+    LineGuideSet tmp;
+    tmp.enabled = true;
+    tmp.keyCurves = m_keyCurves;
+    tmp.useInterpolation = m_interpolate;
+    tmp.lineCount = qMax(2, m_lineCount);
+    m_preview = tmp.isValid() ? tmp.build() : std::vector<GuideCurve>();
+
+    updateUI();
+    update();
+}
+
+void LineGuideDialog::updateUI() {
+    const int n = static_cast<int>(m_keyCurves.size());
+    m_btnDelete->setEnabled(m_selCurve >= 0);
+    m_btnRedraw->setEnabled(m_selCurve >= 0);
+    m_btnUndo->setEnabled(!m_undo.empty());
+    m_btnClear->setEnabled(n > 0);
+    m_spinCount->setEnabled(m_interpolate);
+
+    if (m_drawing) {
+        m_lblStatus->setText(tr("正在描线：按住鼠标沿横线拖动，松开结束"));
+    } else if (n == 0) {
+        m_lblStatus->setText(tr("还没有曲线 — 点「画第 1 条」开始"));
+    } else if (m_interpolate && n < 2) {
+        m_lblStatus->setText(tr("已画 %1 条（插值需 2 条）— 点「画最后 1 条」").arg(n));
+    } else {
+        m_lblStatus->setText(tr("关键曲线 %1 条 → 整页 %2 条横线")
+                             .arg(n).arg(static_cast<int>(m_preview.size())));
+    }
+}
+
+void LineGuideDialog::beginDraw(int replaceIndex) {
+    m_drawing = true;
+    m_replaceIndex = replaceIndex;
+    m_drawPts.clear();
+    if (replaceIndex < 0) m_selCurve = -1;
+    updateUI();
+    update();
+}
+
+int LineGuideDialog::hitCurve(const QPoint& widgetPos, int* endpoint) const {
+    if (endpoint) *endpoint = -1;
+    int best = -1;
+    int bestDist = kHandleHitRadius + 1;
+
+    // 先判端点（优先级高，方便微调）
+    for (size_t i = 0; i < m_keyCurves.size(); ++i) {
+        const auto& pts = m_keyCurves[i].pts;
+        if (pts.size() < 2) continue;
+        const int d0 = (widgetPos - toWidgetCoords(pts.front())).manhattanLength();
+        const int d1 = (widgetPos - toWidgetCoords(pts.back())).manhattanLength();
+        if (d0 < bestDist) { bestDist = d0; best = static_cast<int>(i); if (endpoint) *endpoint = 0; }
+        if (d1 < bestDist) { bestDist = d1; best = static_cast<int>(i); if (endpoint) *endpoint = 1; }
+    }
+    if (best >= 0) return best;
+
+    // 再判曲线本体（按 x 采样出该位置的 y，比较垂直距离）
+    const QPointF ip = toImageCoords(widgetPos);
+    int bestCurve = -1;
+    qreal bestDy = 1e18;
+    for (size_t i = 0; i < m_keyCurves.size(); ++i) {
+        const GuideCurve& c = m_keyCurves[i];
+        if (!c.usable()) continue;
+        const qreal dy = std::abs(c.yAt(ip.x()) - ip.y());
+        if (dy < bestDy) { bestDy = dy; bestCurve = static_cast<int>(i); }
+    }
+    // 换算成 widget 像素再和阈值比较
+    const qreal pixPerImgY = (m_image.height() > 0)
+        ? static_cast<qreal>(m_drawRect.height()) / m_image.height() : 1.0;
+    if (bestCurve >= 0 && bestDy * pixPerImgY <= kHandleHitRadius) return bestCurve;
+    return -1;
+}
+
+void LineGuideDialog::mousePressEvent(QMouseEvent* ev) {
+    if (ev->button() != Qt::LeftButton) return;
+    const QPoint pos = ev->pos();
+    if (!inCanvas(pos)) return;
+
+    if (m_drawing) {
+        m_drawPts.clear();
+        m_drawPts.push_back(toImageCoords(pos));
+        update();
+        return;
+    }
+
+    int ep = -1;
+    const int hit = hitCurve(pos, &ep);
+    m_selCurve = hit;
+    if (hit >= 0) {
+        pushUndo();
+        m_dragSnapshot = m_keyCurves[static_cast<size_t>(hit)].pts;
+        m_dragGrab = toImageCoords(pos);
+        m_dragEndpoint = ep;
+        m_drag = (ep >= 0) ? Drag::Endpoint : Drag::Curve;
+    } else {
+        m_drag = Drag::None;
+    }
+    updateUI();
+    update();
+}
+
+void LineGuideDialog::mouseMoveEvent(QMouseEvent* ev) {
+    m_mousePos = ev->pos();
+    m_mouseIn = inCanvas(m_mousePos);
+
+    if (m_drawing && (ev->buttons() & Qt::LeftButton) && m_mouseIn) {
+        const QPointF ip = toImageCoords(m_mousePos);
+        // 抽稀：距上一个采样点太近就不记，避免点过密导致平滑失效
+        if (m_drawPts.empty() ||
+            QLineF(m_drawPts.back(), ip).length() >= kSampleMinDist) {
+            m_drawPts.push_back(ip);
+        }
+        update();
+        return;
+    }
+
+    if (m_drag == Drag::None || (!(ev->buttons() & Qt::LeftButton))) {
+        if (m_mouseIn) update();   // 放大镜跟随
+        return;
+    }
+
+    if (m_selCurve < 0) { m_drag = Drag::None; return; }
+    auto& pts = m_keyCurves[static_cast<size_t>(m_selCurve)].pts;
+    if (pts.size() != m_dragSnapshot.size()) { m_drag = Drag::None; return; }
+
+    const QPointF now = toImageCoords(m_mousePos);
+    const QPointF delta = now - m_dragGrab;
+
+    if (m_drag == Drag::Endpoint && m_dragEndpoint >= 0) {
+        if (m_dragEndpoint == 0) {
+            // 拖左端：只动首点，并把 x 限制在第二点之前
+            QPointF p = m_dragSnapshot.front();
+            p.rx() = qMin(m_dragSnapshot[1].x() - 1.0, p.x() + delta.x());
+            p.ry() += delta.y();
+            pts.front() = p;
+        } else {
+            QPointF p = m_dragSnapshot.back();
+            p.rx() = qMax(m_dragSnapshot[m_dragSnapshot.size() - 2].x() + 1.0, p.x() + delta.x());
+            p.ry() += delta.y();
+            pts.back() = p;
+        }
+    } else {
+        // 整体拖动
+        for (size_t i = 0; i < pts.size(); ++i) {
+            pts[i] = m_dragSnapshot[i] + delta;
+        }
+    }
+    refresh();
+}
+
+void LineGuideDialog::mouseReleaseEvent(QMouseEvent*) {
+    if (m_drawing) {
+        if (m_drawPts.size() >= 2) {
+            GuideCurve c;
+            c.pts = m_drawPts;
+            c.normalize(2);
+            if (c.usable()) {
+                pushUndo();
+                if (m_replaceIndex >= 0 && m_replaceIndex < static_cast<int>(m_keyCurves.size())) {
+                    m_keyCurves[static_cast<size_t>(m_replaceIndex)] = c;
+                    m_selCurve = m_replaceIndex;
+                } else {
+                    m_keyCurves.push_back(c);
+                    m_selCurve = static_cast<int>(m_keyCurves.size()) - 1;
+                }
+            }
+        }
+        m_drawing = false;
+        m_replaceIndex = -1;
+        m_drawPts.clear();
+        refresh();
+        return;
+    }
+
+    if (m_drag != Drag::None) {
+        m_drag = Drag::None;
+        m_dragEndpoint = -1;
+        m_dragSnapshot.clear();
+        refresh();
+    }
+}
+
+void LineGuideDialog::keyPressEvent(QKeyEvent* ev) {
+    if ((ev->key() == Qt::Key_Delete || ev->key() == Qt::Key_Backspace) && m_selCurve >= 0) {
+        pushUndo();
+        m_keyCurves.erase(m_keyCurves.begin() + m_selCurve);
+        m_selCurve = -1;
+        refresh();
+        return;
+    }
+    if (ev->key() == Qt::Key_Escape && m_drawing) {
+        m_drawing = false;
+        m_drawPts.clear();
+        updateUI();
+        update();
+        return;
+    }
+    QDialog::keyPressEvent(ev);
+}
+
+void LineGuideDialog::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.fillRect(rect(), QColor(40, 40, 40));
+    if (m_scaledPixmap.isNull()) return;
+    p.drawPixmap(m_drawRect.topLeft(), m_scaledPixmap);
+
+    p.setRenderHint(QPainter::Antialiasing);
+
+    auto drawCurve = [&](const GuideCurve& c, const QColor& color, qreal width) {
+        if (!c.usable()) return;
+        QPolygonF poly;
+        poly.reserve(static_cast<int>(c.pts.size()));
+        for (const QPointF& pt : c.pts) poly << toWidgetCoords(pt);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(color, width));
+        p.drawPolyline(poly);
+    };
+
+    // 1) 插值出来的预览曲线（半透明红）
+    for (const GuideCurve& c : m_preview) drawCurve(c, QColor(235, 90, 90, 110), 1.0);
+
+    // 2) 用户手绘的关键曲线（绿；选中的亮黄加粗）
+    for (size_t i = 0; i < m_keyCurves.size(); ++i) {
+        const bool sel = (static_cast<int>(i) == m_selCurve);
+        drawCurve(m_keyCurves[i], sel ? QColor(255, 215, 0) : QColor(0, 210, 130), sel ? 2.6 : 1.8);
+
+        // 端点手柄
+        const auto& pts = m_keyCurves[i].pts;
+        if (pts.size() >= 2) {
+            for (int k = 0; k < 2; ++k) {
+                const QPoint wp = toWidgetCoords(k == 0 ? pts.front() : pts.back());
+                p.setPen(Qt::NoPen);
+                p.setBrush(sel ? QColor(255, 215, 0) : QColor(0, 210, 130));
+                p.drawEllipse(wp, 5, 5);
+                p.setBrush(Qt::white);
+                p.drawEllipse(wp, 2, 2);
+            }
+        }
+    }
+
+    // 3) 正在描的线
+    if (m_drawing && m_drawPts.size() >= 2) {
+        QPolygonF poly;
+        for (const QPointF& pt : m_drawPts) poly << toWidgetCoords(pt);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(255, 215, 0), 2.0, Qt::DashLine));
+        p.drawPolyline(poly);
+    }
+
+    // 4) 描线时的水平参考线，帮助用户画得平
+    if (m_drawing && !m_drawPts.empty()) {
+        const QPoint wp = toWidgetCoords(m_drawPts.front());
+        p.setPen(QPen(QColor(255, 255, 255, 60), 1, Qt::DotLine));
+        p.drawLine(m_drawRect.left(), wp.y(), m_drawRect.right(), wp.y());
+    }
+
+    // 5) 放大镜：弯曲的线在缩略图上看不真切，画线/拖拽时给个 3× 局部放大
+    if (m_mouseIn && (m_drawing || m_drag != Drag::None) &&
+        m_image.width() > 0 && m_image.height() > 0) {
+        const QPointF ip = toImageCoords(m_mousePos);
+        // 图片坐标 -> 缩放位图坐标
+        const qreal sx = static_cast<qreal>(m_scaledPixmap.width())  / m_image.width();
+        const qreal sy = static_cast<qreal>(m_scaledPixmap.height()) / m_image.height();
+        const qreal srcSide = kMagnifierSize / kMagnifierZoom;      // 图片坐标下的边长
+        QRect srcRect(static_cast<int>(ip.x() * sx - srcSide * sx / 2.0),
+                      static_cast<int>(ip.y() * sy - srcSide * sy / 2.0),
+                      qMax(1, static_cast<int>(srcSide * sx)),
+                      qMax(1, static_cast<int>(srcSide * sy)));
+        srcRect = srcRect.intersected(m_scaledPixmap.rect());
+
+        QRect magRect(m_mousePos.x() + 24, m_mousePos.y() + 24, kMagnifierSize, kMagnifierSize);
+        if (magRect.right()  > m_drawRect.right())  magRect.moveLeft(m_mousePos.x() - 24 - kMagnifierSize);
+        if (magRect.bottom() > m_drawRect.bottom()) magRect.moveTop(m_mousePos.y() - 24 - kMagnifierSize);
+
+        if (!srcRect.isEmpty()) {
+            p.setPen(QPen(QColor(255, 215, 0, 200), 1));
+            p.setBrush(Qt::NoBrush);
+            p.drawRect(magRect.adjusted(-1, -1, 1, 1));
+            p.drawPixmap(magRect, m_scaledPixmap, srcRect);
+        }
+    }
+
+    drawCanvasTip(p, m_drawing
+        ? tr("按住左键沿横线拖动 · 松开结束 · Esc 取消")
+        : tr("拖动绿色关键曲线两端的圆点可微调 · 点曲线本体可整体平移 · Delete 删除选中"));
+}
+
+LineGuideSet LineGuideDialog::getGuides() const {
+    LineGuideSet g;
+    g.enabled = !m_keyCurves.empty();
+    g.keyCurves = m_keyCurves;
+    g.lineCount = qMax(2, m_lineCount);
+    g.useInterpolation = m_interpolate;
+    g.baselineRatio = m_sliderRatio ? m_sliderRatio->value() / 100.0 : 0.82;
+    g.baselineOffset = m_spinOffset ? m_spinOffset->value() : 0;
+    g.followCurve = m_checkFollow ? m_checkFollow->isChecked() : true;
+    g.linesPerRow = m_spinPerRow ? m_spinPerRow->value() : 1;
+    return g;
 }
 
 //=============================================================================
