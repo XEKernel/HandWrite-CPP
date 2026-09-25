@@ -203,6 +203,7 @@ private:
     QCheckBox*  m_checkFollow = nullptr;
     QSpinBox*   m_spinPerRow = nullptr;
     QLabel*     m_lblStatus = nullptr;
+    QPushButton* m_btnDetect = nullptr;
     QPushButton* m_btnFirst = nullptr;
     QPushButton* m_btnLast = nullptr;
     QPushButton* m_btnExtra = nullptr;

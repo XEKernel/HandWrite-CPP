@@ -769,6 +769,245 @@ std::vector<GuideCurve> LineGuideSet::build() const {
     return out;
 }
 
+// =============================================================================
+// 横线自动检测
+// =============================================================================
+// 全部是纯函数，可在单元测试里直接喂合成的 QImage 验证。
+
+namespace {
+
+// 印刷横线的亮度介于纸面（亮）与背景（暗，如桌面）之间 —— 三分类后
+// 「中间亮度像素占比」在横线行最高、纸面与背景行都接近 0，
+// 天然免疫光照不均和深色背景干扰（"找最暗行"的旧思路会被桌面带偏）。
+struct LumClass {
+    int paperLum;      // 纸面亮度（直方图最高峰）
+    int midLo, midHi;  // 中间亮度区间：横线所在
+};
+
+LumClass classifyLum(const QImage& gray) {
+    int hist[256] = {0};
+    for (int y = 0; y < gray.height(); ++y) {
+        const uchar* p = gray.constScanLine(y);
+        for (int x = 0; x < gray.width(); ++x) ++hist[p[x]];
+    }
+    int peak = 128;
+    long long best = -1;
+    for (int i = 0; i < 256; ++i) {
+        if (hist[i] > best) { best = hist[i]; peak = i; }
+    }
+    LumClass c;
+    c.paperLum = peak;
+    c.midLo = std::max(1, static_cast<int>(peak * 0.45));
+    c.midHi = std::max(c.midLo + 8, static_cast<int>(peak * 0.85));
+    return c;
+}
+
+// 某行「中间亮度」像素占比
+double rowMidRatio(const QImage& gray, const LumClass& lc, int y) {
+    const uchar* p = gray.constScanLine(y);
+    const int W = gray.width();
+    int cnt = 0;
+    for (int x = 0; x < W; ++x) {
+        const int v = p[x];
+        if (v >= lc.midLo && v < lc.midHi) ++cnt;
+    }
+    return static_cast<double>(cnt) / W;
+}
+
+// 某列块在第 y 行的中间亮度像素占比
+double blockMidRatio(const QImage& gray, const LumClass& lc, int x0, int x1, int y) {
+    const uchar* p = gray.constScanLine(y);
+    int cnt = 0;
+    for (int x = x0; x < x1; ++x) {
+        const int v = p[x];
+        if (v >= lc.midLo && v < lc.midHi) ++cnt;
+    }
+    const int n = x1 - x0;
+    return (n > 0) ? static_cast<double>(cnt) / n : 0.0;
+}
+
+// 平滑（端点保持不变）。用加权核 [1,2,1]/4 而不是等权平均 ——
+// 印刷横线常常只有 1px 粗，等权平均一次就把峰值从 1.0 压到 0.33，
+// 直接掉到检测阈值以下（这个坑就是这么踩到的）。
+void smoothInPlace(std::vector<double>& v, int passes) {
+    if (v.size() < 3) return;
+    for (int pass = 0; pass < passes; ++pass) {
+        std::vector<double> next = v;
+        for (size_t i = 1; i + 1 < v.size(); ++i) {
+            next[i] = (v[i-1] + 2.0 * v[i] + v[i+1]) * 0.25;
+        }
+        v = std::move(next);
+    }
+}
+
+// 局部极大值检测（合并间距过近的峰，保留更高的那个）
+std::vector<int> findPeaks(const std::vector<double>& sig, double thresh) {
+    std::vector<int> peaks;
+    if (sig.size() < 3) return peaks;
+    for (size_t i = 1; i + 1 < sig.size(); ++i) {
+        if (sig[i] < thresh) continue;
+        if (sig[i] < sig[i-1] || sig[i] < sig[i+1]) continue;
+        if (!peaks.empty() && static_cast<int>(i) - peaks.back() < 4) {
+            if (sig[i] > sig[static_cast<size_t>(peaks.back())]) peaks.back() = static_cast<int>(i);
+            continue;
+        }
+        peaks.push_back(static_cast<int>(i));
+    }
+    return peaks;
+}
+
+double medianOf(std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    const size_t n = v.size();
+    return (n % 2) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) * 0.5;
+}
+
+} // namespace
+
+LineDetectionResult HandwriteGenerator::detectHorizontalLines(const QImage& image,
+                                                              int minLines, int maxLines) {
+    LineDetectionResult res;
+
+    if (image.isNull()) {
+        res.message = QObject::tr("背景图片为空，无法检测横线");
+        return res;
+    }
+    const int W = image.width(), H = image.height();
+    if (W < 32 || H < 32) {
+        res.message = QObject::tr("背景图片太小，无法检测横线");
+        return res;
+    }
+
+    const QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
+    const LumClass lc = classifyLum(gray);
+
+    // ---- 1. 行信号 = 中间亮度像素占比 ----
+    // 横线行高（横线是中间亮度），纸面行与背景行都接近 0，
+    // 所以天然免疫光照不均与深色背景，不需要再去趋势。
+    std::vector<double> sig(static_cast<size_t>(H), 0.0);
+    double maxSig = 0.0;
+    for (int y = 0; y < H; ++y) {
+        sig[static_cast<size_t>(y)] = rowMidRatio(gray, lc, y);
+        maxSig = std::max(maxSig, sig[static_cast<size_t>(y)]);
+    }
+    if (maxSig < 0.05) {
+        res.message = QObject::tr("没找到介于纸面与背景之间的横线颜色（可能需要手动描线）");
+        return res;
+    }
+    for (double& s : sig) s /= maxSig;      // 归一化到 [0,1]
+    smoothInPlace(sig, 1);
+
+    // 阈值 0.45：最宽处的横线归一化为 1.0，纸面最窄处的横线也应有 0.5 以上
+    const auto peaks = findPeaks(sig, 0.45);
+#ifdef HANDWRITE_DETECT_DEBUG
+    {
+        QString dbg = QStringLiteral("peaks(%1): ").arg(peaks.size());
+        for (int pk : peaks) dbg += QString::number(pk) + QLatin1Char(' ');
+        std::fprintf(stderr, "[detect] maxSig=%.3f paper=%d mid=[%d,%d)\n%s\n",
+                     maxSig, lc.paperLum, lc.midLo, lc.midHi, dbg.toUtf8().constData());
+        // 行信号采样：每个峰附近 3 行 + 无峰处几行
+        for (int y = 0; y < H; y += H / 24) {
+            std::fprintf(stderr, "[detect]   y=%4d mid=%+.3f\n", y, sig[static_cast<size_t>(y)]);
+        }
+    }
+#endif
+    if (static_cast<int>(peaks.size()) < minLines) {
+        res.message = QObject::tr("没检测到规则的横线（可能需要手动描线："
+                                  "横线颜色太接近纸面、强烈阴影或文字过密都会导致检测失败）");
+        return res;
+    }
+
+    // ---- 2. 等距规则化：间距取中位数，被字迹遮挡而漏检的线会被补回来 ----
+    std::vector<double> gaps;
+    gaps.reserve(peaks.size());
+    for (size_t i = 1; i < peaks.size(); ++i) {
+        gaps.push_back(static_cast<double>(peaks[i] - peaks[i-1]));
+    }
+    const double d = medianOf(gaps);
+    if (d < 8.0) {
+        res.message = QObject::tr("横线间距过小（%1 px），看起来不是作业本").arg(d, 0, 'f', 1);
+        return res;
+    }
+
+    const int first = peaks.front();
+    const int last  = peaks.back();
+    int n = static_cast<int>((last - first) / d + 0.5) + 1;
+    n = std::max(2, std::min(n, maxLines));
+
+    // ---- 3. 逐列跟踪 —— 让结果是曲线，能表达纸张弯曲 ----
+    // 上一步只有「行」分辨率，这里沿每条线在每个列块内找中间亮度占比最高的 y。
+    // 关键：以上一个采样点的 y 为中心搜索，而不是固定的直线位置 ——
+    // 搜索窗口只需覆盖相邻列之间的弯曲变化量，整条线弯几十像素也能跟过去。
+    const int colStep = std::max(6, W / 48);          // 大约 48 个采样列
+    const int search  = std::max(3, static_cast<int>(d / 3.0));
+
+    res.curves.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        int curY = static_cast<int>(first + i * d + 0.5);
+        GuideCurve c;
+        for (int x = 0; x < W; x += colStep) {
+            const int x1 = std::min(W, x + colStep);
+            const int ya = std::max(0, curY - search);
+            const int yb = std::min(H - 1, curY + search);
+            int bestY = curY;
+            double bestV = 0.0;
+            for (int y = ya; y <= yb; ++y) {
+                const double v = blockMidRatio(gray, lc, x, x1, y);
+                if (v > bestV) { bestV = v; bestY = y; }
+            }
+            // 窗口内没有任何横线像素（bestV 仍为 0）时**保持 curY 不变**：
+            // 该列块可能落在纸外/被遮挡，此时取窗口边界会把曲线拽到
+            // 相邻的横线上，之后整条线就整体偏移一个线距（真实踩过）。
+            if (bestV > 0.0) curY = bestY;
+            c.pts.push_back(QPointF(x + (x1 - x) / 2.0, curY));
+        }
+        if (c.pts.size() < 2) continue;
+        c.normalize(1);
+        res.curves.push_back(std::move(c));
+    }
+
+    if (res.curves.size() < 2) {
+        res.message = QObject::tr("检测出的横线不足两条，请手动描线");
+        return res;
+    }
+
+    // ---- 4. 挑关键曲线：首尾 2 条；中间鼓/凹时再补中间 1 条 ----
+    // 弯曲是连续的，线性插值通常够用；但纸中间明显鼓起时插值会偏，
+    // 这时把中间那条也作为关键曲线，插值就变成分段、误差大幅下降。
+    res.keyCurves.push_back(res.curves.front());
+    const int nCurves = static_cast<int>(res.curves.size());
+    if (nCurves >= 3) {
+        const int midIdx = (nCurves - 1) / 2;
+        // 插值权重必须按 midIdx 在整组里的比例取，不能固定 0.5 ——
+        // 条数为偶数时「正中间」没有线，固定 0.5 会天然差出半个线距，
+        // 让直横线也被误判成「弯曲非线性」。
+        const qreal t = (nCurves > 1) ? static_cast<qreal>(midIdx) / (nCurves - 1) : 0.5;
+        const GuideCurve& a = res.curves.front();
+        const GuideCurve& b = res.curves.back();
+        const GuideCurve& mid = res.curves[static_cast<size_t>(midIdx)];
+        double diffSum = 0.0;
+        int cnt = 0;
+        for (const QPointF& p : mid.pts) {
+            const qreal interp = a.yAt(p.x()) * (1.0 - t) + b.yAt(p.x()) * t;
+            diffSum += std::abs(interp - p.y());
+            ++cnt;
+        }
+        const double avgDiff = (cnt > 0) ? diffSum / cnt : 0.0;
+        res.midlineDeviation = (d > 1e-6) ? avgDiff / d : 0.0;
+        // 偏差超过线距的 18% 才认为「弯曲不是线性的」，需要补一条中间关键曲线
+        if (res.midlineDeviation > 0.18) res.keyCurves.push_back(mid);
+    }
+    res.keyCurves.push_back(res.curves.back());
+
+    res.ok = true;
+    res.suggestedCount = static_cast<int>(res.curves.size());
+    res.spacing = d;
+    res.message = QObject::tr("检测到 %1 条横线（间距约 %2 px，关键曲线 %3 条）")
+                  .arg(res.suggestedCount).arg(d, 0, 'f', 1).arg(res.keyCurves.size());
+    return res;
+}
+
 //=============================================================================
 // 分页布局
 //=============================================================================

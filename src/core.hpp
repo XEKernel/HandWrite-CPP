@@ -134,6 +134,29 @@ struct LineGuideSet {
     std::vector<GuideCurve> build() const;
 };
 
+//=============================================================================
+// 横线自动检测
+//=============================================================================
+// 纯手写、零外部依赖（不引 OpenCV / ONNX）。流程：
+//   1. 转灰度，逐行求平均亮度
+//   2. 多尺度局部归一化 —— 去掉上下光照渐变，只留下周期性条纹
+//   3. 峰值检测（局部极大 + 阈值）
+//   4. 等距规则化：取相邻峰间距中位数，补齐被字迹/污渍遮挡而漏检的线
+//   5. 逐列局部最优 y 跟踪 —— 让检测结果是**曲线**，能表达纸张弯曲
+//
+// 检测到的结果只是**候选**，UI 里必须给用户确认/微调的机会，不会直接采用。
+struct LineDetectionResult {
+    bool ok = false;
+    QString message;                    // 失败原因或提示
+    std::vector<GuideCurve> curves;     // 全部检测到的曲线（图片坐标）
+    std::vector<GuideCurve> keyCurves;  // 建议的关键曲线：首尾 2 条（弯曲非线性时补中间 1 条）
+    int suggestedCount = 0;             // 建议的 lineCount
+    double spacing = 0.0;               // 检测到的线距（图片像素）
+    // 中间那条线相对「首尾插值」的平均偏差，已按线距归一化。
+    // 越小说明弯曲越线性；超过阈值才会补第 3 条关键曲线
+    double midlineDeviation = 0.0;
+};
+
 // 导引曲线 <-> 配置用的平铺 double 数组。
 // 编码：每条曲线 = [n, x0,y0, x1,y1, ...]，依次拼接。
 // 之所以不直接存字符串，是为了复用 Config 现有的 double[] 读写（含引号/转义处理）。
@@ -339,6 +362,13 @@ public:
     // --- 字体可用性 ---
     // 返回 false 表示字体文件无法加载（message 给出路径）
     static bool checkFontAvailable(const std::string& fontPath, std::string* message = nullptr);
+
+    // --- 横线自动检测 ---
+    // 从背景图片里检测印刷横线（作业本）。返回的是**候选**结果，
+    // 调用方（UI）必须给用户确认与微调的机会，不要直接采信。
+    static LineDetectionResult detectHorizontalLines(const QImage& image,
+                                                     int minLines = 4,
+                                                     int maxLines = 400);
 
     // 生成
     std::vector<QImage> generatePreview(const std::string& text);

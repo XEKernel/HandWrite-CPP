@@ -1786,6 +1786,9 @@ LineGuideDialog::LineGuideDialog(const QString& imagePath, const LineGuideSet& g
         return b;
     };
 
+    m_btnDetect = mkBtn(tr("自动检测"),  tr("自动检测照片上的印刷横线，结果可继续手动微调\n"
+                                            "（红色/深色横线或强烈阴影可能导致失败，失败时请手动描线）"));
+    bl->addSpacing(4);
     m_btnFirst  = mkBtn(tr("画第 1 条"),   tr("在照片上按住鼠标，沿最上面那条横线拖动"));
     m_btnLast   = mkBtn(tr("画最后 1 条"), tr("在照片上按住鼠标，沿最下面那条横线拖动"));
     m_btnExtra  = mkBtn(tr("+ 关键线"),    tr("再补一条关键曲线（纸张中间鼓/凹时用，会变成分段插值）"));
@@ -1880,6 +1883,25 @@ LineGuideDialog::LineGuideDialog(const QString& imagePath, const LineGuideSet& g
     root->addWidget(okBar, 0);
 
     // ── 连接 ──
+    connect(m_btnDetect, &QPushButton::clicked, this, [this]() {
+        pushUndo();
+        const auto res = HandwriteGenerator::detectHorizontalLines(m_image);
+        if (!res.ok) {
+            m_lblStatus->setText(res.message);
+            m_keyCurves = m_undo.back();   // 检测失败不改变现状
+            m_undo.pop_back();
+            return;
+        }
+        m_keyCurves = res.keyCurves;
+        m_lineCount = qBound(2, res.suggestedCount, 200);
+        m_interpolate = true;
+        m_selCurve = -1;
+        m_spinCount->blockSignals(true);
+        m_spinCount->setValue(m_lineCount);
+        m_spinCount->blockSignals(false);
+        m_checkInterp->setChecked(true);
+        refresh();
+    });
     connect(m_btnFirst, &QPushButton::clicked, this, [this]() { beginDraw(-1); });
     connect(m_btnLast,  &QPushButton::clicked, this, [this]() { beginDraw(-1); });
     connect(m_btnExtra, &QPushButton::clicked, this, [this]() { beginDraw(-1); });

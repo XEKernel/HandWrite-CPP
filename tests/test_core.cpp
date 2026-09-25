@@ -456,7 +456,115 @@ static void testLineGuides() {
 }
 
 //=============================================================================
-// 6. 配置读写往返
+// 6. 横线自动检测
+//=============================================================================
+namespace {
+
+// 合成一张「作业本照片」：纸面浅色，横线为浅蓝灰
+// sag > 0 时横线中间下凹（模拟纸张弯曲）
+QImage makeNotebookImage(int w, int h, int lineCount, double sag, bool drawLines = true) {
+    QImage img(w, h, QImage::Format_RGB32);
+    img.fill(qRgb(250, 250, 246));
+
+    if (!drawLines || lineCount < 2) return img;
+
+    const double top = h * 0.08;
+    const double bottom = h * 0.94;
+    for (int i = 0; i < lineCount; ++i) {
+        const double base = top + (bottom - top) * i / (lineCount - 1.0);
+        for (int x = 0; x < w; ++x) {
+            const double t = static_cast<double>(x) / w;
+            const double y = base + sag * 4.0 * t * (1.0 - t);
+            const int yi = static_cast<int>(std::round(y));
+            if (yi >= 0 && yi < h) img.setPixel(x, yi, qRgb(150, 165, 195));
+        }
+    }
+    return img;
+}
+
+} // namespace
+
+static void testLineDetection() {
+    section("横线自动检测");
+
+    // --- 直横线：条数与线距应准确 ---
+    {
+        const QImage img = makeNotebookImage(200, 400, 20, 0.0);
+        const auto res = HandwriteGenerator::detectHorizontalLines(img);
+        check(res.ok, "直横线图检测成功", res.message.toStdString());
+        if (res.ok) {
+            // 20 条线均分，实际检测取首尾峰之间，故为 19
+            check(std::abs(res.suggestedCount - 19) <= 1, "条数 ≈ 19",
+                  "got=" + std::to_string(res.suggestedCount));
+            check(std::abs(res.spacing - (400 * 0.86 / 19.0)) < 2.5, "线距与构造值接近",
+                  "got=" + std::to_string(res.spacing));
+            check(res.midlineDeviation < 0.18, "直横线弯曲接近线性（偏差小）",
+                  "dev=" + std::to_string(res.midlineDeviation));
+            checkEq(res.keyCurves.size(), size_t(2), "直横线只需首尾 2 条关键曲线");
+        }
+    }
+    // --- 弯曲横线：检测出的应是曲线（能表达纸张弯曲） ---
+    {
+        const QImage img = makeNotebookImage(400, 400, 10, 30.0);
+        const auto res = HandwriteGenerator::detectHorizontalLines(img);
+        check(res.ok, "弯曲横线图检测成功", res.message.toStdString());
+        if (res.ok && !res.curves.empty()) {
+            const GuideCurve& c = res.curves.front();
+            const qreal yLeft  = c.yAt(c.pts.front().x());
+            const qreal yMid   = c.yAt(200.0);
+            const qreal yRight = c.yAt(c.pts.back().x() - 1.0);
+            check(yMid > yLeft + 15.0, "曲线中间下凹（不是直线）—— 左→中落差足够",
+                  "left=" + std::to_string(yLeft) + " mid=" + std::to_string(yMid));
+            check(yMid > yRight + 15.0, "曲线右端回升",
+                  "right=" + std::to_string(yRight) + " mid=" + std::to_string(yMid));
+            check(std::abs(yLeft - yRight) < 6.0, "左右两端高度接近");
+        }
+    }
+    // --- 空白图：应当检测失败并给出提示 ---
+    {
+        const QImage img = makeNotebookImage(200, 400, 0, 0.0, false);
+        const auto res = HandwriteGenerator::detectHorizontalLines(img);
+        check(!res.ok, "空白图检测失败");
+        check(!res.message.isEmpty(), "失败时给出可读提示");
+    }
+    // --- 空图 ---
+    {
+        const auto res = HandwriteGenerator::detectHorizontalLines(QImage());
+        check(!res.ok, "空图片检测失败");
+        check(!res.message.isEmpty(), "空图片有提示");
+    }
+    // --- 小图 ---
+    {
+        const auto res = HandwriteGenerator::detectHorizontalLines(QImage(16, 16, QImage::Format_RGB32));
+        check(!res.ok, "过小图片检测失败");
+    }
+    // --- 检测出的关键曲线应能直接用于插值渲染 ---
+    {
+        const QImage img = makeNotebookImage(400, 400, 12, 20.0);
+        const auto res = HandwriteGenerator::detectHorizontalLines(img);
+        if (res.ok) {
+            LineGuideSet g;
+            g.enabled = true;
+            g.keyCurves = res.keyCurves;
+            g.lineCount = res.suggestedCount;
+            g.useInterpolation = true;
+            check(g.isValid(), "检测结果填回 LineGuideSet 后有效");
+            const auto built = g.build();
+            checkEq(built.size(), static_cast<size_t>(res.suggestedCount),
+                    "插值条数 = 检测条数");
+            if (!built.empty()) {
+                // 首条应与检测到的首条一致
+                check(std::abs(built.front().yAt(200.0) - res.curves.front().yAt(200.0)) < 2.0,
+                      "插值的首条 = 检测的首条");
+                check(std::abs(built.back().yAt(200.0) - res.curves.back().yAt(200.0)) < 2.0,
+                      "插值的末条 = 检测的末条");
+            }
+        }
+    }
+}
+
+//=============================================================================
+// 7. 配置读写往返
 //=============================================================================
 static void testConfigRoundTrip() {
     section("Config 往返");
@@ -617,7 +725,7 @@ static void testConfigRoundTrip() {
 }
 
 //=============================================================================
-// 7. 内存预算（P0-2 回归）
+// 8. 内存预算（P0-2 回归）
 //=============================================================================
 static void testRenderBudget() {
     section("渲染内存预算");
@@ -658,7 +766,7 @@ static void testRenderBudget() {
 }
 
 //=============================================================================
-// 8. 字体可用性检查（P2-10）
+// 9. 字体可用性检查（P2-10）
 //=============================================================================
 static void testFontCheck() {
     section("字体可用性检查");
@@ -688,6 +796,7 @@ int main(int argc, char** argv) {
     testCharOverrideRoundTrip();
     testLayoutText();
     testLineGuides();
+    testLineDetection();
     testConfigRoundTrip();
     testRenderBudget();
     testFontCheck();
