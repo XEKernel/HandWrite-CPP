@@ -152,6 +152,21 @@ int main(int argc, char* argv[]) {
         if (auto v = config.charColor()) params.fillColor = Color((*v)[0],(*v)[1],(*v)[2],(*v)[3]);
         if (auto v = config.backgroundColor()) params.backgroundColor = Color((*v)[0],(*v)[1],(*v)[2],(*v)[3]);
         if (auto v = config.seed()) params.seed = *v;
+        // 背景图横线导引（作业本横线）
+        {
+            LineGuideSet& g = params.lineGuides;
+            if (auto v = config.lineGuideEnabled()) g.enabled = *v;
+            if (auto v = config.lineGuideLineCount()) g.lineCount = *v;
+            if (auto v = config.lineGuideInterpolate()) g.useInterpolation = *v;
+            if (auto v = config.lineGuideBaselineRatio()) g.baselineRatio = *v;
+            if (auto v = config.lineGuideBaselineOffset()) g.baselineOffset = *v;
+            if (auto v = config.lineGuideFollowCurve()) g.followCurve = *v;
+            if (auto v = config.lineGuideLinesPerRow()) g.linesPerRow = *v;
+            if (auto v = config.lineGuideCurves()) {
+                g.keyCurves = parseGuideCurves(*v);
+                if (g.keyCurves.empty()) g.enabled = false;   // 数据坏了就别启用
+            }
+        }
         if (auto v = config.charOverrides()) {
             for (const auto& s : *v) {
                 if (auto r = HandwriteGenerator::deserializeCharOverride(s))

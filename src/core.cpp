@@ -580,6 +580,196 @@ std::vector<LineLayout> HandwriteGenerator::layoutText(const QString& text, cons
 }
 
 //=============================================================================
+// 横线导引几何
+//=============================================================================
+// 全部是纯函数，可直接在单元测试里验证。
+
+void GuideCurve::sample(qreal x, qreal* y, qreal* angle) const {
+    if (y) *y = 0.0;
+    if (angle) *angle = 0.0;
+    if (pts.empty()) return;
+
+    if (pts.size() == 1) {
+        if (y) *y = pts.front().y();
+        return;
+    }
+
+    // 端点外夹取：不做外推，否则边缘会出现离谱的 y
+    if (x <= pts.front().x()) {
+        if (y) *y = pts.front().y();
+        if (angle) *angle = std::atan2(pts[1].y() - pts[0].y(), pts[1].x() - pts[0].x());
+        return;
+    }
+    if (x >= pts.back().x()) {
+        if (y) *y = pts.back().y();
+        const size_t n = pts.size();
+        if (angle) *angle = std::atan2(pts[n-1].y() - pts[n-2].y(), pts[n-1].x() - pts[n-2].x());
+        return;
+    }
+
+    // 线性查找所在段（点数通常 < 100，二分不值得；热路径也只是每字符一次）
+    size_t i = 0;
+    while (i + 2 < pts.size() && pts[i + 1].x() < x) ++i;
+
+    const QPointF& a = pts[i];
+    const QPointF& b = pts[i + 1];
+    const qreal dx = b.x() - a.x();
+    if (std::abs(dx) < 1e-6) {
+        if (y) *y = b.y();
+        if (angle) *angle = 0.0;
+        return;
+    }
+    const qreal t = (x - a.x()) / dx;
+    if (y) *y = a.y() + (b.y() - a.y()) * t;
+    if (angle) *angle = std::atan2(b.y() - a.y(), dx);
+}
+
+void GuideCurve::normalize(int smoothPasses) {
+    if (pts.size() < 2) return;
+
+    // 1) 按 x 升序
+    std::stable_sort(pts.begin(), pts.end(),
+                     [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
+
+    // 2) 合并 x 过近的点（取 y 均值），避免出现零长度的段
+    std::vector<QPointF> merged;
+    merged.reserve(pts.size());
+    for (const QPointF& p : pts) {
+        if (!merged.empty() && std::abs(p.x() - merged.back().x()) < 1.0) {
+            merged.back().setY((merged.back().y() + p.y()) * 0.5);
+            continue;
+        }
+        merged.push_back(p);
+    }
+    if (merged.size() < 2) { pts = merged; return; }
+
+    // 3) 移动平均平滑（端点保持不变，否则手绘的首尾会被拉偏）
+    for (int pass = 0; pass < smoothPasses; ++pass) {
+        std::vector<QPointF> next = merged;
+        for (size_t i = 1; i + 1 < merged.size(); ++i) {
+            next[i].setY((merged[i-1].y() + merged[i].y() + merged[i+1].y()) / 3.0);
+        }
+        merged = std::move(next);
+    }
+    pts = std::move(merged);
+}
+
+std::vector<QPointF> GuideCurve::resampleByArcLength(int n) const {
+    std::vector<QPointF> out;
+    if (pts.empty() || n < 2) return out;
+
+    // 累计弧长
+    std::vector<qreal> acc(pts.size(), 0.0);
+    for (size_t i = 1; i < pts.size(); ++i) {
+        const qreal dx = pts[i].x() - pts[i-1].x();
+        const qreal dy = pts[i].y() - pts[i-1].y();
+        acc[i] = acc[i-1] + std::sqrt(dx*dx + dy*dy);
+    }
+    const qreal total = acc.back();
+    if (total < 1e-6) {
+        // 退化成一点：全部输出同一点
+        out.assign(static_cast<size_t>(n), pts.front());
+        return out;
+    }
+
+    out.reserve(static_cast<size_t>(n));
+    size_t seg = 1;
+    for (int k = 0; k < n; ++k) {
+        const qreal target = total * k / static_cast<qreal>(n - 1);
+        while (seg + 1 < pts.size() && acc[seg] < target) ++seg;
+        const qreal a0 = acc[seg-1], a1 = acc[seg];
+        const qreal t = (a1 - a0) < 1e-9 ? 0.0 : (target - a0) / (a1 - a0);
+        const QPointF& p0 = pts[seg-1];
+        const QPointF& p1 = pts[seg];
+        out.push_back(QPointF(p0.x() + (p1.x() - p0.x()) * t,
+                              p0.y() + (p1.y() - p0.y()) * t));
+    }
+    return out;
+}
+
+std::vector<GuideCurve> parseGuideCurves(const std::vector<double>& flat) {
+    std::vector<GuideCurve> out;
+    size_t i = 0;
+    while (i < flat.size()) {
+        const double nRaw = flat[i++];
+        const int n = static_cast<int>(nRaw);
+        // n 必须是正整数，且剩余数据足够；否则说明文件被改坏了，停止解析
+        if (n < 2 || nRaw != static_cast<double>(n) || i + static_cast<size_t>(n) * 2 > flat.size()) {
+            break;
+        }
+        GuideCurve c;
+        c.pts.reserve(static_cast<size_t>(n));
+        for (int j = 0; j < n; ++j) {
+            const double x = flat[i + static_cast<size_t>(j) * 2];
+            const double y = flat[i + static_cast<size_t>(j) * 2 + 1];
+            c.pts.push_back(QPointF(x, y));
+        }
+        i += static_cast<size_t>(n) * 2;
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+std::vector<double> flattenGuideCurves(const std::vector<GuideCurve>& curves) {
+    std::vector<double> out;
+    for (const GuideCurve& c : curves) {
+        out.push_back(static_cast<double>(c.pts.size()));
+        for (const QPointF& p : c.pts) {
+            out.push_back(p.x());
+            out.push_back(p.y());
+        }
+    }
+    return out;
+}
+
+std::vector<GuideCurve> LineGuideSet::build() const {
+    std::vector<GuideCurve> out;
+    if (keyCurves.empty()) return out;
+
+    // 不插值：手绘几条就用几条
+    if (!useInterpolation || keyCurves.size() < 2 || lineCount < 2) {
+        for (const GuideCurve& c : keyCurves) {
+            if (c.usable()) out.push_back(c);
+        }
+        return out;
+    }
+
+    // 插值前先把各条关键曲线重采样到相同点数，逐点线性混合才有意义
+    const int N = 64;
+    std::vector<std::vector<QPointF>> keys;
+    keys.reserve(keyCurves.size());
+    for (const GuideCurve& c : keyCurves) {
+        if (c.usable()) keys.push_back(c.resampleByArcLength(N));
+    }
+    if (keys.size() < 2) {
+        for (const GuideCurve& c : keyCurves) {
+            if (c.usable()) out.push_back(c);
+        }
+        return out;
+    }
+
+    const int K = static_cast<int>(keys.size());
+    out.reserve(static_cast<size_t>(lineCount));
+    for (int i = 0; i < lineCount; ++i) {
+        // 把 i 映射到关键曲线区间 [k, k+1] 上的局部比例 t
+        const qreal f = static_cast<qreal>(i) / (lineCount - 1) * (K - 1);
+        int k = static_cast<int>(std::floor(f));
+        if (k > K - 2) k = K - 2;
+        if (k < 0) k = 0;
+        const qreal t = f - k;
+
+        GuideCurve c;
+        c.pts.reserve(static_cast<size_t>(N));
+        for (int j = 0; j < N; ++j) {
+            c.pts.push_back(keys[static_cast<size_t>(k)][static_cast<size_t>(j)] * (1.0 - t)
+                          + keys[static_cast<size_t>(k) + 1][static_cast<size_t>(j)] * t);
+        }
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+//=============================================================================
 // 分页布局
 //=============================================================================
 
@@ -615,7 +805,46 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         }
     }
     const bool bgUsable = !backgroundImage.isNull();
-    
+
+    // ---- 横线导引：原图坐标 -> 画布坐标（只算一次，所有页共用） ----
+    std::vector<GuideCurve> guideCurves;
+    const bool useGuides = m_params.lineGuides.isValid() && bgUsable
+                           && backgroundSourceSize.width() > 0
+                           && backgroundSourceSize.height() > 0;
+    if (useGuides) {
+        const qreal gx = static_cast<qreal>(scaledWidth) / backgroundSourceSize.width();
+        const qreal gy = static_cast<qreal>(scaledHeight) / backgroundSourceSize.height();
+        for (GuideCurve& c : m_params.lineGuides.build()) {
+            GuideCurve scaled;
+            scaled.pts.reserve(c.pts.size());
+            for (const QPointF& p : c.pts) {
+                scaled.pts.push_back(QPointF(p.x() * gx, p.y() * gy));
+            }
+            guideCurves.push_back(std::move(scaled));
+        }
+    }
+    const int guideCount = static_cast<int>(guideCurves.size());
+    const int stepPerRow = std::max(1, m_params.lineGuides.linesPerRow);
+
+    // 第 i 行文字的基线：坐在第 guideIdx 条与第 (guideIdx + stepPerRow) 条之间，
+    // 位置由 baselineRatio 决定（0 = 贴上线，1 = 贴下线）
+    auto guideBaseline = [&](int guideIdx, qreal xAt) -> qreal {
+        const int hi = guideIdx + stepPerRow;
+        const qreal upper = guideCurves[static_cast<size_t>(guideIdx)].yAt(xAt);
+        qreal lower;
+        if (hi < guideCount) {
+            lower = guideCurves[static_cast<size_t>(hi)].yAt(xAt);
+        } else if (guideIdx > 0) {
+            // 最后一条：用前一条的间距外推，保证最后一行也有合理的行高
+            const qreal prev = guideCurves[static_cast<size_t>(guideIdx) - 1].yAt(xAt);
+            lower = upper + (upper - prev);
+        } else {
+            lower = upper;
+        }
+        return upper + (lower - upper) * m_params.lineGuides.baselineRatio
+               + m_params.lineGuides.baselineOffset * m_params.rate;
+    };
+
     // ---- 随机种子：0 = 每次随机；非 0 = 固定，预览与导出结果一致 ----
     std::mt19937 seedRng = (m_params.seed != 0)
         ? std::mt19937(static_cast<std::mt19937::result_type>(m_params.seed))
@@ -625,14 +854,17 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
     std::vector<std::vector<int>> currentPageCharIndexMap;
     std::vector<qreal> currentPageYPositions;
     std::vector<int> currentPageParaIndex;
-    
+    std::vector<int> currentPageGuideIdx;   // 每行使用的导引曲线下标（-1 = 不跟随）
+
     qreal y = scaledTopMargin + fm.ascent();
     int paraIndex = 0;
+    int guideIdx = 0;                       // 下一条待用的导引曲线
     
     // 纹理网格对齐: 计算网格尺寸
+    // 导引启用时强制关闭 —— 两套对齐机制同时开会得到无意义的位置
     const int textureGridSize = (m_params.paperTexture == PaperTexture::Composition) ? 28 : 25;
     const int scaledGrid = textureGridSize * m_params.rate;
-    const bool alignToGrid = (m_params.paperTexture != PaperTexture::None);
+    const bool alignToGrid = (m_params.paperTexture != PaperTexture::None) && !useGuides;
     
     if (alignToGrid) {
         // 首行对齐到最近网格线，至少到第一个实用网格线
@@ -658,12 +890,17 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         pageData.charIndexMap = std::move(currentPageCharIndexMap);
         pageData.lineYPositions = std::move(currentPageYPositions);
         pageData.lineParagraphIndex = std::move(currentPageParaIndex);
+        pageData.guideCurves = guideCurves;
+        pageData.lineGuideIdx = std::move(currentPageGuideIdx);
         pageDataList.push_back(std::move(pageData));
         
         currentPage.clear();
         currentPageCharIndexMap.clear();
         currentPageYPositions.clear();
         currentPageParaIndex.clear();
+        currentPageGuideIdx.clear();
+        // 翻页后重新从第一条横线开始（作业本每页排版相同）
+        guideIdx = 0;
     };
     
     for (const auto& line : textLines) {
@@ -674,10 +911,23 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         }
         
         const bool isSeparator = (line.text == QStringLiteral("---"));
-        
-        if (!currentPage.empty()) {
+
+        if (useGuides) {
+            // 导引模式：行位置完全由横线决定，与 lineSpacing 无关
+            const qreal contentLeftPx = m_params.leftMargin * m_params.rate;
+            if (guideIdx + stepPerRow > guideCount) {
+                flushPage();            // 本页横线用尽
+            }
+            y = guideBaseline(guideIdx, contentLeftPx);
+
+            // 横线可能被画到页面外（用户手抖），兜底翻页而不是画到纸外面
+            if (y + fm.descent() > scaledHeight - scaledBottomMargin) {
+                flushPage();
+                y = guideBaseline(guideIdx, contentLeftPx);
+            }
+        } else if (!currentPage.empty()) {
             // 段间距：当前行是段首且上一行不属同一段
-            const bool isNewPara = (currentPageParaIndex.empty() || 
+            const bool isNewPara = (currentPageParaIndex.empty() ||
                                     currentPageParaIndex.back() != paraIndex);
             int extraSpacing = 0;
             if (isNewPara && !currentPageParaIndex.empty()) {
@@ -714,7 +964,9 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         
         currentPageYPositions.push_back(y);
         currentPageParaIndex.push_back(paraIndex);
-        
+        currentPageGuideIdx.push_back(useGuides ? guideIdx : -1);
+        if (useGuides) guideIdx += stepPerRow;
+
         RenderLine renderLine;
         renderLine.text = line.text;
         renderLine.font = font;
@@ -741,6 +993,7 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         }
         pageData.backgroundImage = backgroundImage;
         pageData.backgroundSourceSize = backgroundSourceSize;
+        pageData.guideCurves = guideCurves;
         pageData.rng.seed(seedRng());
         pageDataList.push_back(std::move(pageData));
     }
@@ -761,7 +1014,9 @@ void HandwriteGenerator::drawTextWithPerturbationStatic(QPainter& painter, const
                                                          TextWarp warp,
                                                          qreal warpPhaseBase,
                                                          qreal warpAmplitude,
-                                                         qreal warpWavelength) {
+                                                         qreal warpWavelength,
+                                           const GuideCurve* guideCurve,
+                                           bool followCurve) {
     Q_UNUSED(startCharIndex);
     QFontMetrics fm(baseFont);
     std::uniform_real_distribution<double> strikeDist(0.0, 1.0);
@@ -769,6 +1024,12 @@ void HandwriteGenerator::drawTextWithPerturbationStatic(QPainter& painter, const
     qreal warpPhase = warpPhaseBase;
     const bool warpActive = (warp != TextWarp::None) && (warpWavelength > 1.0)
                             && (std::abs(warpAmplitude) > 0.0);
+
+    // 横线导引：以行首 x 处的曲线高度为基准，行内的相对偏移逐字叠加。
+    // 曲线本身已包含透视与纸张弯曲（用户在照片上直接描出来的），
+    // 所以这里不再做任何逆映射 —— 见 docs/PLAN_LINE_GUIDES_2026-09-13.md
+    const bool guideActive = (guideCurve != nullptr) && guideCurve->usable();
+    const qreal guideY0 = guideActive ? guideCurve->yAt(x) : 0.0;
     
     for (int i = 0; i < text.length(); ++i) {
         QChar c = text[i];
@@ -852,13 +1113,20 @@ void HandwriteGenerator::drawTextWithPerturbationStatic(QPainter& painter, const
         
         QFontMetrics perturbedFm(perturbedFont);
         
-        // 涂改效果（drawY 已含逐字变形偏移）
-        const qreal drawY = y + perturbY + warpOffset;
+        // 横线导引：按当前 x 采样曲线，得到该字符的纵向偏移与切线角
+        qreal curveY = 0.0, curveAngle = 0.0;
+        if (guideActive) guideCurve->sample(x, &curveY, &curveAngle);
+        const qreal guideOffset = guideActive ? (curveY - guideY0) : 0.0;
+        // 切线角与逐字扰动角叠加（不覆盖），弯曲与手抖同时生效
+        const qreal theta = perturbTheta + (guideActive && followCurve ? curveAngle : 0.0);
+
+        // 涂改效果（drawY 已含逐字变形偏移与导引偏移）
+        const qreal drawY = y + guideOffset + perturbY + warpOffset;
         if (strikethrough) {
-            const bool rotated = std::abs(perturbTheta) > 0.001;
+            const bool rotated = std::abs(theta) > 0.001;
             if (rotated) {
                 painter.translate(x + perturbX, drawY);
-                painter.rotate(perturbTheta * 180.0 / M_PI);
+                painter.rotate(theta * 180.0 / M_PI);
                 painter.drawText(0, 0, QString(c));
             } else {
                 painter.drawText(x + perturbX, drawY, QString(c));
@@ -878,9 +1146,9 @@ void HandwriteGenerator::drawTextWithPerturbationStatic(QPainter& painter, const
                                  static_cast<int>(drawY - perturbedFm.ascent() / 2));
             }
         } else {
-            if (std::abs(perturbTheta) > 0.001) {
+            if (std::abs(theta) > 0.001) {
                 painter.translate(x + perturbX, drawY);
-                painter.rotate(perturbTheta * 180.0 / M_PI);
+                painter.rotate(theta * 180.0 / M_PI);
                 painter.drawText(0, 0, QString(c));
             } else {
                 painter.drawText(x + perturbX, drawY, QString(c));
@@ -908,15 +1176,21 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     // 背景图已在 layoutPages 里解码 + 缩放好，这里只负责绘制
     // （QImage 隐式共享，赋值零拷贝；旧实现此处每页重新读盘解码整张图）
     const QImage& bgImage = data.backgroundImage;
-    bool useCalibration = data.params.bgCalibration.isValid()
-                          && !bgImage.isNull()
-                          && !data.params.backgroundImagePath.empty();
-    
+    const bool anchorsValid = data.params.bgCalibration.isValid()
+                              && !bgImage.isNull()
+                              && !data.params.backgroundImagePath.empty();
+
+    // 横线导引优先于锚点 warp：导引曲线是用户在照片上直接描出来的，
+    // 本身就包含透视 + 弯曲的全部形变。再走一遍 warp 等于绕一圈回来，
+    // 只会被 3×3 网格的分片近似拖出误差（见规划文档 3.3）。
+    const bool guidesValid = !data.guideCurves.empty();
+    const bool useWarp = anchorsValid && !guidesValid;
+
     // 决定在哪个画布上绘制文字
     QImage* textCanvas = &image;  // 默认直接画在主图上
-    QImage textOverlay;           // 校准模式下单独的文字画布
-    
-    if (useCalibration) {
+    QImage textOverlay;           // warp 模式下单独的文字画布
+
+    if (useWarp) {
         textOverlay = QImage(data.scaledWidth, data.scaledHeight, QImage::Format_ARGB32);
         textOverlay.fill(Qt::transparent);
         textCanvas = &textOverlay;
@@ -927,8 +1201,8 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
     painter.setRenderHint(QPainter::TextAntialiasing);
     
     if (!bgImage.isNull()) {
-        if (useCalibration) {
-            // 校准模式：背景画到主图
+        if (useWarp) {
+            // warp 模式：背景画到主图（文字另画在 overlay，最后再贴上去）
             QPainter bgPainter(&image);
             bgPainter.drawImage(image.rect(), bgImage);
             bgPainter.end();
@@ -937,8 +1211,8 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
         }
     }
     
-    // 纸张纹理（校准模式下跳过，因为纹理线无法透视变换）
-    if (!useCalibration) {
+    // 纸张纹理：有背景照片时不画（纹理线会盖在照片上，也跟照片里的印刷横线对不上）
+    if (!useWarp && !guidesValid) {
         drawPaperTexture(painter, data.scaledWidth, data.scaledHeight,
                          data.params.paperTexture, data.params.rate,
                          data.params.textureOpacity);
@@ -1021,16 +1295,26 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
             lineCharIndexMap = &data.charIndexMap[lineIdx];
         }
         
+        // 该行对应的导引曲线（画布空间）；-1 表示不跟随
+        const GuideCurve* guideCurve = nullptr;
+        if (lineIdx < data.lineGuideIdx.size()) {
+            const int gi = data.lineGuideIdx[lineIdx];
+            if (gi >= 0 && gi < static_cast<int>(data.guideCurves.size())) {
+                guideCurve = &data.guideCurves[static_cast<size_t>(gi)];
+            }
+        }
+        
         drawTextWithPerturbationStatic(painter, line, x, y, font,
                                        data.params.wordSpacing * data.params.rate,
                                        data.params, localRng, 0, lineCharIndexMap,
-                                       warp, warpPhaseBase, warpAmplitude, warpWavelength);
+                                       warp, warpPhaseBase, warpAmplitude, warpWavelength,
+                                       guideCurve, data.params.lineGuides.followCurve);
     }
     
     painter.end();
     
     // 网格形变：将文字画布映射到背景图片的校准区域
-    if (useCalibration) {
+    if (useWarp) {
         auto& cal = data.params.bgCalibration;
         
         // 缩放锚点到渲染画布坐标（锚点存于背景「原图」坐标空间）

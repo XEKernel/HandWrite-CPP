@@ -82,6 +82,65 @@ enum class TextDirection { Horizontal, Vertical };
 enum class TextWarp { None, Arc, Wave, Circle };
 
 //=============================================================================
+// 背景图横线导引（Line Guides）
+//=============================================================================
+// 让文字排布在作业本照片的印刷横线上。纸张会弯曲，所以横线是**曲线**，
+// 用采样折线表示（而非两点式直线，也非贝塞尔 —— 后者拖控制点不直观）。
+//
+// 坐标空间：与 BackgroundCalibration::gridPoints 一致，存「背景原图」坐标，
+// 渲染前统一乘 sx/sy 换算到画布空间。
+struct GuideCurve {
+    std::vector<QPointF> pts;   // 采样点，按 x 升序
+
+    bool usable() const { return pts.size() >= 2; }
+
+    // 按 x 采样：线性插值出 y，并给出该处切线角（弧度，正 = 顺时针）。
+    // x 超出范围时夹到端点（不做外推，避免边缘乱飞）。
+    void sample(qreal x, qreal* y, qreal* angle) const;
+
+    qreal yAt(qreal x) const { qreal v = 0, a = 0; sample(x, &v, &a); return v; }
+    qreal angleAt(qreal x) const { qreal v = 0, a = 0; sample(x, &v, &a); return a; }
+
+    // 手绘后调用：按 x 排序 -> 去重 -> 移动平均平滑
+    void normalize(int smoothPasses = 2);
+
+    // 按弧长均匀重采样为 n 个点（不同曲线点数不一致时靠它对齐后才能插值）
+    std::vector<QPointF> resampleByArcLength(int n) const;
+};
+
+struct LineGuideSet {
+    bool enabled = false;
+
+    // 关键曲线：用户手绘的 K 条（K >= 2），中间按弧长参数插值自动补全。
+    // 因为纸张弯曲是连续形变，画 2 条（首、尾）再插值通常就够了，
+    // 中间鼓起时再补画 1 条即可分段插值 —— 交互成本从「画 20 条」降到「画 2~3 条」。
+    std::vector<GuideCurve> keyCurves;
+    int  lineCount = 20;             // 最终条数（含首尾关键曲线）
+    bool useInterpolation = true;    // false = 只用手绘的那几条
+
+    // --- 文字落位 ---
+    double baselineRatio   = 0.82;   // 0 = 贴上线，1 = 贴下线
+    int    baselineOffset  = 0;      // 未乘 rate 的像素微调
+    bool   followCurve     = true;   // 逐字跟随曲线弯曲（关闭则退化为直线 + 行首倾角）
+    int    linesPerRow     = 1;      // 一行文字占几条横线的高度
+
+    bool isValid() const {
+        if (!enabled || keyCurves.empty()) return false;
+        if (!useInterpolation) return true;
+        return keyCurves.size() >= 2 && lineCount >= 2;
+    }
+
+    // 由关键曲线 + lineCount 生成完整曲线列表（弧长参数插值）
+    std::vector<GuideCurve> build() const;
+};
+
+// 导引曲线 <-> 配置用的平铺 double 数组。
+// 编码：每条曲线 = [n, x0,y0, x1,y1, ...]，依次拼接。
+// 之所以不直接存字符串，是为了复用 Config 现有的 double[] 读写（含引号/转义处理）。
+std::vector<GuideCurve> parseGuideCurves(const std::vector<double>& flat);
+std::vector<double> flattenGuideCurves(const std::vector<GuideCurve>& curves);
+
+//=============================================================================
 // 单行排版结果
 //=============================================================================
 struct LineLayout {
@@ -132,6 +191,7 @@ struct TemplateParams {
     double textureOpacity = 0.3;          // 纹理透明度
     std::string backgroundImagePath;      // 背景图片路径（空=不使用）
     BackgroundCalibration bgCalibration;   // 背景图片锚点校准
+    LineGuideSet lineGuides;              // 背景图横线导引（作业本横线）
 
     // --- 字体 ---
     std::string fontPath;
@@ -212,6 +272,11 @@ struct PageRenderData {
     
     // 段落信息：lineIdx -> paragraph index，用于段间距
     std::vector<int> lineParagraphIndex;
+
+    // 横线导引：已从「原图坐标」换算到画布空间（乘 sx/sy）
+    // lineGuideIdx[i] = 第 i 行使用的曲线下标，-1 = 该行不跟随曲线
+    std::vector<GuideCurve> guideCurves;
+    std::vector<int> lineGuideIdx;
 
     // 已按页面尺寸解码并缩放好的背景图（所有页共享同一份，QImage 隐式共享零拷贝）
     QImage backgroundImage;
@@ -326,7 +391,10 @@ private:
                                                 TextWarp warp = TextWarp::None,
                                                 qreal warpPhaseBase = 0.0,
                                                 qreal warpAmplitude = 0.0,
-                                                qreal warpWavelength = 0.0);
+                                                qreal warpWavelength = 0.0,
+                                                // 横线导引：非空时逐字沿曲线定位（画布空间坐标）
+                                                const GuideCurve* guideCurve = nullptr,
+                                                bool followCurve = true);
     
     // 墨水洇染效果
     static void applyInkBleed(QImage& image, double radius);

@@ -217,7 +217,19 @@ std::optional<std::vector<int>> Config::getIntArray(const std::string& key) cons
 }
 std::optional<std::vector<double>> Config::getDoubleArray(const std::string& key) const {
     auto it = m_data.find(key);
-    if (it != m_data.end() && std::holds_alternative<std::vector<double>>(it->second)) return std::get<std::vector<double>>(it->second);
+    if (it == m_data.end()) return std::nullopt;
+    if (std::holds_alternative<std::vector<double>>(it->second))
+        return std::get<std::vector<double>>(it->second);
+    // 值全是整数时，load() 会把它存成 intArray（那是它区分语义时的既有行为）。
+    // 但对「坐标 / 参数」类字段，整数只是小数的特例，必须能按 double 读回来 ——
+    // 否则锚点、导引曲线这些恰好落在整数像素上的坐标会在一次往返后整组丢失。
+    if (std::holds_alternative<std::vector<int>>(it->second)) {
+        const auto& a = std::get<std::vector<int>>(it->second);
+        std::vector<double> out;
+        out.reserve(a.size());
+        for (int v : a) out.push_back(static_cast<double>(v));
+        return out;
+    }
     return std::nullopt;
 }
 std::optional<std::vector<std::string>> Config::getStringArray(const std::string& key) const {
@@ -328,6 +340,30 @@ void Config::setBgCalibPoints(const std::vector<double>& v) { set("bg_calib_poin
 // ---- 新增：字符级覆盖 ----
 std::optional<std::vector<std::string>> Config::charOverrides() const { return getStringArray("char_overrides"); }
 void Config::setCharOverrides(const std::vector<std::string>& v) { set("char_overrides", v); }
+
+// ---- 新增：背景图横线导引（作业本横线） ----
+std::optional<bool> Config::lineGuideEnabled() const {
+    auto v = getInt("line_guide_enabled");
+    return v.has_value() ? std::optional<bool>(*v != 0) : std::nullopt; }
+void Config::setLineGuideEnabled(bool v) { set("line_guide_enabled", v ? 1 : 0); }
+std::optional<int> Config::lineGuideLineCount() const { return getInt("line_guide_line_count"); }
+void Config::setLineGuideLineCount(int v) { set("line_guide_line_count", v); }
+std::optional<bool> Config::lineGuideInterpolate() const {
+    auto v = getInt("line_guide_interpolate");
+    return v.has_value() ? std::optional<bool>(*v != 0) : std::nullopt; }
+void Config::setLineGuideInterpolate(bool v) { set("line_guide_interpolate", v ? 1 : 0); }
+std::optional<std::vector<double>> Config::lineGuideCurves() const { return getDoubleArray("line_guide_curves"); }
+void Config::setLineGuideCurves(const std::vector<double>& v) { set("line_guide_curves", v); }
+std::optional<double> Config::lineGuideBaselineRatio() const { return getDouble("line_guide_baseline_ratio"); }
+void Config::setLineGuideBaselineRatio(double v) { set("line_guide_baseline_ratio", v); }
+std::optional<int> Config::lineGuideBaselineOffset() const { return getInt("line_guide_baseline_offset"); }
+void Config::setLineGuideBaselineOffset(int v) { set("line_guide_baseline_offset", v); }
+std::optional<bool> Config::lineGuideFollowCurve() const {
+    auto v = getInt("line_guide_follow_curve");
+    return v.has_value() ? std::optional<bool>(*v != 0) : std::nullopt; }
+void Config::setLineGuideFollowCurve(bool v) { set("line_guide_follow_curve", v ? 1 : 0); }
+std::optional<int> Config::lineGuideLinesPerRow() const { return getInt("line_guide_lines_per_row"); }
+void Config::setLineGuideLinesPerRow(int v) { set("line_guide_lines_per_row", v); }
 
 // ---- 新增：复现种子 ----
 std::optional<unsigned int> Config::seed() const {

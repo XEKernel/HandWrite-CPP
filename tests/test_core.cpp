@@ -290,7 +290,173 @@ static void testLayoutText() {
 }
 
 //=============================================================================
-// 5. 配置读写往返
+// 5. 横线导引（Line Guides）几何
+//=============================================================================
+static void testLineGuides() {
+    section("Line Guides 几何");
+
+    const qreal deg45 = std::atan2(1.0, 1.0);
+
+    // --- sample：线性插值 + 端点夹取 + 切线角 ---
+    {
+        GuideCurve c;
+        c.pts = std::vector<QPointF>{QPointF(0, 100), QPointF(100, 200)};
+        checkEq(c.yAt(0.0), 100.0, "sample 起点");
+        checkEq(c.yAt(100.0), 200.0, "sample 终点");
+        checkEq(c.yAt(50.0), 150.0, "sample 中点线性插值");
+        checkEq(c.yAt(-100.0), 100.0, "sample 左越界夹到端点（不外推）");
+        checkEq(c.yAt(9999.0), 200.0, "sample 右越界夹到端点（不外推）");
+        check(std::abs(c.angleAt(50.0) - deg45) < 1e-6, "直线切线角 = 45°");
+    }
+    // --- 弯曲曲线：中间高、两端低 ---
+    {
+        GuideCurve c;
+        c.pts = std::vector<QPointF>{QPointF(0, 100), QPointF(50, 120), QPointF(100, 100)};
+        checkEq(c.yAt(50.0), 120.0, "弯曲曲线顶点");
+        checkEq(c.yAt(25.0), 110.0, "弯曲曲线左半插值");
+        checkEq(c.yAt(75.0), 110.0, "弯曲曲线右半插值");
+        check(c.angleAt(25.0) > 0.0, "左半切线向下（角度为正）");
+        check(c.angleAt(75.0) < 0.0, "右半切线向上（角度为负）");
+        check(std::abs(c.angleAt(25.0) + c.angleAt(75.0)) < 1e-6, "左右切线角对称");
+    }
+    // --- 边界情况 ---
+    {
+        GuideCurve empty;
+        check(!empty.usable(), "空曲线不可用");
+        checkEq(empty.yAt(10.0), 0.0, "空曲线采样返回 0");
+        GuideCurve one;
+        one.pts = std::vector<QPointF>{QPointF(5, 5)};
+        check(!one.usable(), "单点曲线不可用");
+        checkEq(one.yAt(10.0), 5.0, "单点曲线采样返回该点");
+    }
+    // --- normalize：排序、去重、平滑 ---
+    {
+        GuideCurve c;
+        // 故意乱序 + 重复 x + 一个尖刺
+        c.pts = std::vector<QPointF>{QPointF(80, 100), QPointF(0, 100), QPointF(40, 200), QPointF(40, 100),
+                 QPointF(20, 100), QPointF(100, 100)};
+        c.normalize(2);
+        check(c.pts.size() >= 2, "normalize 后仍可用");
+        bool sorted = true;
+        for (size_t i = 1; i < c.pts.size(); ++i) {
+            if (c.pts[i].x() < c.pts[i-1].x()) { sorted = false; break; }
+        }
+        check(sorted, "normalize 后按 x 升序");
+        bool noDup = true;
+        for (size_t i = 1; i < c.pts.size(); ++i) {
+            if (std::abs(c.pts[i].x() - c.pts[i-1].x()) < 1.0) { noDup = false; break; }
+        }
+        check(noDup, "normalize 合并了 x 重复的点");
+        // 平滑后尖刺应被压低（原尖刺 y=150（200与100合并），平滑后应明显小于它）
+        check(c.yAt(40.0) < 145.0, "normalize 平滑压低了尖刺");
+        check(std::abs(c.yAt(0.0) - 100.0) < 1e-6, "normalize 不改首端点");
+        check(std::abs(c.yAt(100.0) - 100.0) < 1e-6, "normalize 不改尾端点");
+    }
+    // --- resampleByArcLength ---
+    {
+        GuideCurve c;
+        c.pts = std::vector<QPointF>{QPointF(0, 0), QPointF(50, 0), QPointF(100, 0)};
+        const auto rs = c.resampleByArcLength(5);
+        checkEq(rs.size(), size_t(5), "重采样点数 = 5");
+        if (rs.size() == 5) {
+            check(std::abs(rs.front().x() - 0.0) < 1e-6, "重采样首点 = 原首点");
+            check(std::abs(rs.back().x() - 100.0) < 1e-6, "重采样尾点 = 原尾点");
+            bool monotonic = true;
+            for (size_t i = 1; i < rs.size(); ++i) {
+                if (rs[i].x() < rs[i-1].x()) { monotonic = false; break; }
+            }
+            check(monotonic, "重采样点单调递增");
+        }
+        const auto degenerate = GuideCurve{}.resampleByArcLength(4);
+        check(degenerate.empty(), "空曲线重采样返回空");
+    }
+    // --- 关键曲线插值 build() ---
+    {
+        LineGuideSet g;
+        g.enabled = true;
+        g.useInterpolation = true;
+        g.lineCount = 5;
+        GuideCurve top, bottom;
+        top.pts    = {QPointF(0, 100), QPointF(100, 100)};
+        bottom.pts = std::vector<QPointF>{QPointF(0, 500), QPointF(100, 500)};
+        g.keyCurves = {top, bottom};
+
+        check(g.isValid(), "build 前置：配置有效");
+        const auto curves = g.build();
+        checkEq(curves.size(), size_t(5), "build 生成 5 条");
+        if (curves.size() == 5) {
+            check(std::abs(curves[0].yAt(50.0) - 100.0) < 1e-6, "第 1 条 = 首关键曲线");
+            check(std::abs(curves[4].yAt(50.0) - 500.0) < 1e-6, "第 5 条 = 尾关键曲线");
+            check(std::abs(curves[2].yAt(50.0) - 300.0) < 1e-6, "中间条 = 两端平均");
+            check(std::abs(curves[1].yAt(50.0) - 200.0) < 1e-6, "第 2 条按 1/4 插值");
+        }
+    }
+    // --- 关键曲线插值（分段：3 条关键曲线） ---
+    {
+        LineGuideSet g;
+        g.enabled = true;
+        g.lineCount = 5;
+        GuideCurve a, b, c;
+        a.pts = std::vector<QPointF>{QPointF(0, 0),   QPointF(100, 0)};
+        b.pts = std::vector<QPointF>{QPointF(0, 100), QPointF(100, 100)};
+        c.pts = std::vector<QPointF>{QPointF(0, 300), QPointF(100, 300)};   // 后段间距是前段的 2 倍
+        g.keyCurves = {a, b, c};
+        const auto curves = g.build();
+        checkEq(curves.size(), size_t(5), "分段插值仍生成 5 条");
+        if (curves.size() == 5) {
+            check(std::abs(curves[2].yAt(50.0) - 100.0) < 1e-6, "中间条落在第 2 条关键曲线上");
+            check(std::abs(curves[4].yAt(50.0) - 300.0) < 1e-6, "末条 = 第 3 条关键曲线");
+        }
+    }
+    // --- 不插值模式 ---
+    {
+        LineGuideSet g;
+        g.enabled = true;
+        g.useInterpolation = false;
+        GuideCurve a, b;
+        a.pts = std::vector<QPointF>{QPointF(0, 10), QPointF(100, 10)};
+        b.pts = std::vector<QPointF>{QPointF(0, 20), QPointF(100, 20)};
+        g.keyCurves = {a, b};
+        check(g.isValid(), "不插值模式：只有 1 条也有效");
+        checkEq(g.build().size(), size_t(2), "不插值时条数 = 手绘条数");
+    }
+    // --- isValid ---
+    {
+        LineGuideSet g;
+        check(!g.isValid(), "未启用 = 无效");
+        g.enabled = true;
+        check(!g.isValid(), "启用但无关键曲线 = 无效");
+        GuideCurve a; a.pts = std::vector<QPointF>{QPointF(0,0), QPointF(1,1)};
+        g.keyCurves = {a};
+        check(!g.isValid(), "插值模式只有 1 条 = 无效");
+        g.useInterpolation = false;
+        check(g.isValid(), "不插值模式 1 条即可");
+    }
+    // --- 曲线编解码往返（配置用） ---
+    {
+        GuideCurve c1, c2;
+        c1.pts = std::vector<QPointF>{QPointF(0, 100), QPointF(50, 120), QPointF(100, 100)};
+        c2.pts = std::vector<QPointF>{QPointF(0, 300), QPointF(100, 305)};
+        const std::vector<GuideCurve> src = {c1, c2};
+        const auto flat = flattenGuideCurves(src);
+        // 2 条曲线：(1 + 3*2) + (1 + 2*2) = 7 + 5 = 12
+        checkEq(flat.size(), size_t(12), "平铺数组长度 = 12");
+        const auto back = parseGuideCurves(flat);
+        checkEq(back.size(), size_t(2), "解回 2 条曲线");
+        if (back.size() == 2) {
+            checkEq(back[0].pts.size(), size_t(3), "第 1 条点数还原");
+            checkEq(back[1].pts.size(), size_t(2), "第 2 条点数还原");
+            check(std::abs(back[0].yAt(50.0) - 120.0) < 1e-6, "第 1 条曲线形状还原");
+            check(std::abs(back[1].yAt(100.0) - 305.0) < 1e-6, "第 2 条曲线形状还原");
+        }
+        check(parseGuideCurves({}).empty(), "空数组 -> 空");
+        check(parseGuideCurves({0, 1, 2}).empty(), "非法点数 -> 停止解析");
+        check(parseGuideCurves({3, 0, 0}).empty(), "数据不足 -> 停止解析");
+    }
+}
+
+//=============================================================================
+// 6. 配置读写往返
 //=============================================================================
 static void testConfigRoundTrip() {
     section("Config 往返");
@@ -327,6 +493,20 @@ static void testConfigRoundTrip() {
         c.setCharOverrides({"0,3,42,1.25,,,10,20,30,200"});
         c.setSeed(20260912u);
         c.setCharColor({0, 0, 0, 255});
+        // 横线导引（含一条弯曲的关键曲线）
+        c.setLineGuideEnabled(true);
+        c.setLineGuideLineCount(20);
+        c.setLineGuideInterpolate(true);
+        c.setLineGuideBaselineRatio(0.75);
+        c.setLineGuideBaselineOffset(-2);
+        c.setLineGuideFollowCurve(true);
+        c.setLineGuideLinesPerRow(1);
+        {
+            GuideCurve ca, cb;
+            ca.pts = std::vector<QPointF>{QPointF(0, 100), QPointF(500, 118), QPointF(1000, 100)};
+            cb.pts = std::vector<QPointF>{QPointF(0, 800), QPointF(1000, 812)};
+            c.setLineGuideCurves(flattenGuideCurves({ca, cb}));
+        }
         check(c.save(path.toStdString()), "保存成功");
     }
 
@@ -349,6 +529,23 @@ static void testConfigRoundTrip() {
             checkEq(arr->size(), size_t(3), "混合数组长度 = 3（旧实现会丢成 1）");
             if (arr->size() == 3) checkEq((*arr)[1], 2.5, "混合数组保留小数项");
         }
+        // 回归：纯整数坐标会被 load() 存成 intArray，必须仍能按 double 数组读回
+        // （锚点、导引曲线落在整数像素上时就是这种情况，否则整组坐标会丢）
+        {
+            QFile f2(tmp.filePath(QStringLiteral("ints.conf")));
+            if (f2.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream ts(&f2);
+                ts << "ints = [10, 20, 30]\n";
+            }
+            Config mi(tmp.filePath(QStringLiteral("ints.conf")).toStdString());
+            const auto ia = mi.getDoubleArray("ints");
+            check(ia.has_value(), "纯整数数组能按 double 数组读出");
+            if (ia) {
+                checkEq(ia->size(), size_t(3), "纯整数数组长度不变");
+                if (ia->size() == 3) checkEq((*ia)[2], 30.0, "纯整数数组值还原");
+            }
+        }
+
         checkEq(m.getDouble("sig").value_or(-1.0), 0.05, "0.05 不被截断成 0");
         checkEq(m.getDouble("opacity").value_or(-1.0), 0.3, "0.3 不被截断成 0");
         checkEq(m.getDouble("rate").value_or(-1.0), 0.125, "0.125 不被截断成 0");
@@ -391,6 +588,26 @@ static void testConfigRoundTrip() {
         const auto color = c.charColor();
         check(color.has_value() && color->size() == 4, "char_color 长度 = 4");
 
+        // 横线导引
+        checkEq(c.lineGuideEnabled().value_or(false), true, "line_guide_enabled");
+        checkEq(c.lineGuideLineCount().value_or(-1), 20, "line_guide_line_count");
+        checkEq(c.lineGuideInterpolate().value_or(false), true, "line_guide_interpolate");
+        checkEq(c.lineGuideBaselineRatio().value_or(-1.0), 0.75, "line_guide_baseline_ratio");
+        checkEq(c.lineGuideBaselineOffset().value_or(99), -2, "line_guide_baseline_offset");
+        checkEq(c.lineGuideFollowCurve().value_or(false), true, "line_guide_follow_curve");
+        {
+            const auto flat = c.lineGuideCurves();
+            check(flat.has_value() && flat->size() == (1 + 3*2) + (1 + 2*2), "line_guide_curves 长度");
+            if (flat) {
+                const auto curves = parseGuideCurves(*flat);
+                checkEq(curves.size(), size_t(2), "解回 2 条关键曲线");
+                if (curves.size() == 2) {
+                    check(std::abs(curves[0].yAt(500.0) - 118.0) < 1e-6, "弯曲关键曲线形状还原");
+                    check(std::abs(curves[1].yAt(1000.0) - 812.0) < 1e-6, "第 2 条关键曲线还原");
+                }
+            }
+        }
+
         // 二次保存必须幂等（内容稳定）
         Config again(path.toStdString());
         check(again.save(path.toStdString()), "二次保存成功");
@@ -400,7 +617,7 @@ static void testConfigRoundTrip() {
 }
 
 //=============================================================================
-// 6. 内存预算（P0-2 回归）
+// 7. 内存预算（P0-2 回归）
 //=============================================================================
 static void testRenderBudget() {
     section("渲染内存预算");
@@ -441,7 +658,7 @@ static void testRenderBudget() {
 }
 
 //=============================================================================
-// 7. 字体可用性检查（P2-10）
+// 8. 字体可用性检查（P2-10）
 //=============================================================================
 static void testFontCheck() {
     section("字体可用性检查");
@@ -470,6 +687,7 @@ int main(int argc, char** argv) {
     testParseMarkdown();
     testCharOverrideRoundTrip();
     testLayoutText();
+    testLineGuides();
     testConfigRoundTrip();
     testRenderBudget();
     testFontCheck();

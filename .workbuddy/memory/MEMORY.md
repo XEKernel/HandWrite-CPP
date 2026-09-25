@@ -36,6 +36,26 @@
 - 覆盖：中文标点转换、Markdown 解析、字符覆盖序列化、文本排版/避头尾、Config 往返、内存预算、字体检查
 - 测试二进制自动选平台插件：当前目录无 `platforms/`（未跑 windeployqt）才用 `offscreen`
 
+## 规划中（未开工）
+- **作业本横线导引 Line Guides**（2026-09-13 提出，目标 v2.8.0）：
+  `docs/PLAN_LINE_GUIDES_2026-09-13.md`（v2 版）。让背景作业本照片上的印刷横线可被手绘定义，
+  文字按横线排布。流程固定为「先锚点定透视 → 再画横线」。
+- ⭐ **路线决策：guide 启用时 bypass `warpMesh`，在画布 B 上逐字沿曲线直接绘制，不做逆映射**。
+  理由：guide 曲线是用户在照片（B 空间）上描的，已含透视+弯曲全部形变；
+  B→C→B 绕一圈理想恒等、实际因 quadToQuad 分片近似与 3×3 网格过粗而引入误差。
+- ⭐ `drawTextWithPerturbationStatic`（core.cpp:755-897）**本来就是逐字循环**
+  （每字符 save/translate/rotate/drawText/restore），所以"逐字沿曲线"改造量很小。
+- 锚点与 guide 分工正交：锚点管页面四角几何（低频透视），guide 管每行曲线（高频弯曲）。
+- 交互关键：**手绘 2 条关键曲线 + 填条数 → 弧长参数插值**出中间线，成本从 20 条降到 2~3 条。
+- **批次 1 已完成（2026-09-25，v2.8.0）**：引擎 + 配置 + CLI 预设读取，零告警，ctest 152/152，
+  端到端验证通过（文字沿弯曲横线排布 + 正确翻页）。**批次 2（手绘 UI）未开工**，
+  目前只能通过预设文件的 `line_guide_*` 配置使用。代码未提交。
+- ⭐ **robocopy 陷阱**：Git Bash 里必须 `MSYS_NO_PATHCONV=1 robocopy ...`，
+  否则 `/MIR` `/XD` 被 MSYS 路径转换破坏，robocopy 静默失败 → 构建的是旧代码还以为同步成功。
+  同步后必须 grep 目标文件确认含新符号。
+- ⭐ **Config double 数组陷阱**：值全为整数时被存成 intArray，`getDoubleArray` 会返回空。
+  已修复（自动兼容两种存储），新增坐标类字段时记得加「纯整数」回归用例。
+
 ## 产品网页
 - 托管于 **XEKernel.github.io** → `projects/handwrite/`
 - 源码修改 → push HandWrite-CPP `Web/**` → GitHub Actions 自动同步到 XEKernel.github.io

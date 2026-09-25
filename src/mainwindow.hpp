@@ -228,6 +228,9 @@ private:
     QLineEdit *m_lineEditSeed;
     QLabel *m_labelBgImage;
     BackgroundCalibration m_bgCalibration;
+    // 横线导引：批次 1 还没有编辑 UI，只做「预设加载 → 保存」的原样保留，
+    // 避免 GUI 保存预设时把它丢掉（v2.7.0 刚修过这类「预设不完整」问题）
+    LineGuideSet m_lineGuides;
     QString m_bgImagePath;
     
     QListWidget *m_presetList;

@@ -648,6 +648,7 @@ TemplateParams MainWindow::getParamsFromForm() {
     p.textureOpacity=m_spinTextureOpacity->value();
     p.backgroundImagePath=m_bgImagePath.toStdString();
     p.bgCalibration=m_bgCalibration;
+    p.lineGuides=m_lineGuides;
     p.paragraphIndent=m_checkParagraphIndent->isChecked();
     p.paragraphSpacing=m_spinParagraphSpacing->value();
     p.textDirection = (m_comboTextDirection->currentIndex() == 1) ? TextDirection::Vertical : TextDirection::Horizontal;
@@ -1036,6 +1037,17 @@ void MainWindow::saveConfiguration(const QString& path) {
         for(const auto& pt:m_bgCalibration.gridPoints){ pts.push_back(pt.x()); pts.push_back(pt.y()); }
         c.setBgCalibPoints(pts);
     }
+    // 背景图横线导引（作业本横线）
+    c.setLineGuideEnabled(m_lineGuides.enabled && !m_lineGuides.keyCurves.empty());
+    if(m_lineGuides.enabled && !m_lineGuides.keyCurves.empty()){
+        c.setLineGuideLineCount(m_lineGuides.lineCount);
+        c.setLineGuideInterpolate(m_lineGuides.useInterpolation);
+        c.setLineGuideBaselineRatio(m_lineGuides.baselineRatio);
+        c.setLineGuideBaselineOffset(m_lineGuides.baselineOffset);
+        c.setLineGuideFollowCurve(m_lineGuides.followCurve);
+        c.setLineGuideLinesPerRow(m_lineGuides.linesPerRow);
+        c.setLineGuideCurves(flattenGuideCurves(m_lineGuides.keyCurves));
+    }
     // 字符级覆盖
     {
         std::vector<std::string> list;
@@ -1101,6 +1113,20 @@ void MainWindow::loadConfiguration(const QString& path) {
                 m_bgCalibration=cal;
             }
         }
+    }
+    // 背景图横线导引（批次 1 无编辑 UI，只原样保留）
+    {
+        LineGuideSet g;
+        g.enabled=c.lineGuideEnabled().value_or(false);
+        if(auto v=c.lineGuideLineCount())g.lineCount=*v;
+        if(auto v=c.lineGuideInterpolate())g.useInterpolation=*v;
+        if(auto v=c.lineGuideBaselineRatio())g.baselineRatio=*v;
+        if(auto v=c.lineGuideBaselineOffset())g.baselineOffset=*v;
+        if(auto v=c.lineGuideFollowCurve())g.followCurve=*v;
+        if(auto v=c.lineGuideLinesPerRow())g.linesPerRow=*v;
+        if(auto v=c.lineGuideCurves())g.keyCurves=parseGuideCurves(*v);
+        if(g.keyCurves.empty())g.enabled=false;
+        m_lineGuides=g;
     }
     // 字符级覆盖
     if(auto list=c.charOverrides()){

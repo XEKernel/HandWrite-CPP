@@ -95,6 +95,16 @@ public:
     std::optional<std::vector<std::string>> charOverrides() const;
     void setCharOverrides(const std::vector<std::string>& v);
 
+    // 背景图横线导引（作业本横线；曲线按 [n, x0,y0, x1,y1, ...] 平铺存放）
+    std::optional<bool> lineGuideEnabled() const; void setLineGuideEnabled(bool v);
+    std::optional<int> lineGuideLineCount() const; void setLineGuideLineCount(int v);
+    std::optional<bool> lineGuideInterpolate() const; void setLineGuideInterpolate(bool v);
+    std::optional<std::vector<double>> lineGuideCurves() const; void setLineGuideCurves(const std::vector<double>& v);
+    std::optional<double> lineGuideBaselineRatio() const; void setLineGuideBaselineRatio(double v);
+    std::optional<int> lineGuideBaselineOffset() const; void setLineGuideBaselineOffset(int v);
+    std::optional<bool> lineGuideFollowCurve() const; void setLineGuideFollowCurve(bool v);
+    std::optional<int> lineGuideLinesPerRow() const; void setLineGuideLinesPerRow(int v);
+
     // 复现种子（0 = 随机）
     std::optional<unsigned int> seed() const; void setSeed(unsigned int v);
 
