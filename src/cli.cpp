@@ -186,7 +186,10 @@ int main(int argc, char* argv[]) {
                     for (int i = 0; i < rows * cols; ++i)
                         cal.gridPoints.push_back(QPointF((*pts)[2 * i], (*pts)[2 * i + 1]));
                 }
-                cal.enabled = cal.isValid();
+                // 注意顺序：isValid() 自身要求 enabled 为真，
+                // 所以必须先把 enabled 置真再校验 —— 否则锚点校准在 CLI 里永远不生效
+                cal.enabled = true;
+                if (!cal.isValid()) cal.enabled = false;
                 params.bgCalibration = cal;
             }
         }

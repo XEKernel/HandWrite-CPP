@@ -1,9 +1,12 @@
 # HandWrite-CPP 项目记忆
 
 ## 版本号规范
-- 格式: `主版本.功能添加.小修复`（当前 **2.7.0**）
+- 格式: `主版本.功能添加.小修复`（当前 **2.9.0**）
 - **BUG 修复** → 第三位 +1；**功能添加** → 第二位 +1；第二位满 10 进 1 → 第一位 +1
+- ⭐ 用户 2026-09-25 补充：**开发过程中每完成一次修改就第三位 +1**
+  （横线导引即 2.8.0 → 2.8.1 引擎 → 2.8.2 手绘 UI → 2.9.0 水平透视补偿，功能整体完成时进第二位）
 - **版本已单源化**：只在 `CMakeLists.txt` 的 `project(VERSION x.y.z)` 改一处，通过 `HANDWRITE_VERSION` 宏注入 `main.cpp`/`cli.cpp`；`mainwindow.cpp` 用 `QApplication::applicationVersion()`；`build.yml` 用 `${{ github.ref_name }}`。不再手工同步 6 处。
+- 发版时要**同步更新 `CHANGELOG.md` 对应版本小节**，CI 用它拼 Release 正文
 
 ## 构建（本机环境）
 - MSYS2 安装位置: `F:\MSYS2`（用 ucrt64 子环境）
@@ -47,10 +50,15 @@
   （每字符 save/translate/rotate/drawText/restore），所以"逐字沿曲线"改造量很小。
 - 锚点与 guide 分工正交：锚点管页面四角几何（低频透视），guide 管每行曲线（高频弯曲）。
 - 交互关键：**手绘 2 条关键曲线 + 填条数 → 弧长参数插值**出中间线，成本从 20 条降到 2~3 条。
-- **批次 1+2 已完成（2026-09-25，v2.8.0）**：渲染引擎 + 配置 + CLI 预设读取 + 手绘 UI
-  （`ImageCanvasDialog` 基类、`LineGuideDialog` 拖动描线/平滑/放大镜/撤销、主窗口「横线...」按钮）。
-  零告警，ctest 152/152，端到端验证通过（文字沿弯曲横线排布 + 正确翻页），
-  offscreen 截图确认 UI 布局与锚点对话框无回归。**批次 3（水平透视补偿）/ 批次 4（自动检测）未开工**。
+- **批次 1+2+3 已完成（2026-09-25，v2.9.0）**：渲染引擎 + 配置 + CLI 预设读取 + 手绘 UI
+  （`ImageCanvasDialog` 基类、`LineGuideDialog` 拖动描线/平滑/放大镜/撤销、主窗口「横线...」按钮）
+  + 水平透视补偿（锚点四角插值出每行的文字块左边界与宽度，逐行 translate+scale）。
+  零告警，ctest 152/152，端到端验证通过（正拍/斜拍/翻页），
+  offscreen 截图确认 UI 布局与锚点对话框无回归。**批次 4（自动检测）未开工**。
+- ⭐ **水平透视补偿的坑**：平移与缩放必须**一起做**（`translate(origin - scale*contentLeft)` 再 `scale`）。
+  只做 scale、原点固定在 contentLeft，会导致行首仍停在页面标称位置、文字画到纸外面。
+- ⭐ **「先赋值再自校验」顺序陷阱**：`cal.enabled = cal.isValid()` 永远得 false，
+  因为 `isValid()` 自身要求 `enabled` 为真。CLI 与 GUI 两条路径要对称测试。
 - ⭐ **GUI 自动化验证套路**：临时 CMake 工程链接 `mainwindow.cpp`，`QT_QPA_PLATFORM=offscreen`
   + `QTimer::singleShot(400, [&]{ w->grab().save(png); })` 渲染成 PNG 人工检查。
   AUTOUIC 记得把 `ui/mainwindow.ui` 加进 target。

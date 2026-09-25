@@ -826,6 +826,56 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
     const int guideCount = static_cast<int>(guideCurves.size());
     const int stepPerRow = std::max(1, m_params.lineGuides.linesPerRow);
 
+    // ---- 水平透视补偿：锚点四角给出页面几何，据此算每一行的水平缩放 ----
+    // 斜拍时纸是梯形 —— 同样的字数在窄的一侧应该占更窄的宽度。
+    // 这里只算「文字块左边界→右边界」在照片上的实际宽度与页面标称宽度之比；
+    // 正拍且锚点=画布四角时结果恰好是 1.0，不会改变任何既有行为。
+    const qreal contentLeftPx = m_params.leftMargin * m_params.rate;
+    const bool havePerspective = useGuides && m_params.bgCalibration.isValid()
+                                 && backgroundSourceSize.width() > 0
+                                 && backgroundSourceSize.height() > 0;
+    QPointF perspTL, perspTR, perspBL, perspBR;
+    if (havePerspective) {
+        const auto& cal = m_params.bgCalibration;
+        const qreal px = static_cast<qreal>(scaledWidth) / backgroundSourceSize.width();
+        const qreal py = static_cast<qreal>(scaledHeight) / backgroundSourceSize.height();
+        auto gp = [&](int r, int c) {
+            const QPointF& p = cal.at(r, c);
+            return QPointF(p.x() * px, p.y() * py);
+        };
+        perspTL = gp(0, 0);
+        perspTR = gp(0, cal.cols - 1);
+        perspBL = gp(cal.rows - 1, 0);
+        perspBR = gp(cal.rows - 1, cal.cols - 1);
+    }
+    auto perspXAt = [&](qreal u, qreal v) {
+        return (1 - v) * ((1 - u) * perspTL.x() + u * perspTR.x())
+             + v       * ((1 - u) * perspBL.x() + u * perspBR.x());
+    };
+    // 归一化后的文字块左右边界（页面上 leftMargin / rightMargin 对应的位置）
+    const qreal uTextL = (scaledWidth > 0)
+        ? qBound(0.0, contentLeftPx / scaledWidth, 1.0) : 0.0;
+    const qreal uTextR = (scaledWidth > 0)
+        ? qBound(0.0, (scaledWidth - contentLeftPx) / scaledWidth, 1.0) : 1.0;
+    const qreal refTextWidth = static_cast<qreal>(scaledWidth) - 2.0 * contentLeftPx;
+
+    // 该行文字块在照片上的左边界（画布坐标）。无锚点时退回页面标称位置。
+    auto horizontalOriginAt = [&](qreal yCanvas) -> qreal {
+        if (!havePerspective || scaledWidth < 2 || scaledHeight < 2) return contentLeftPx;
+        const qreal v = qBound(0.0, yCanvas / scaledHeight, 1.0);
+        return perspXAt(uTextL, v);
+    };
+    // 该行的水平缩放 = 照片上文字块实际宽度 / 页面标称宽度
+    auto horizontalScaleAt = [&](qreal yCanvas) -> qreal {
+        if (!havePerspective || scaledWidth < 2 || scaledHeight < 2) return 1.0;
+        const qreal v = qBound(0.0, yCanvas / scaledHeight, 1.0);
+        const qreal xl = perspXAt(uTextL, v);
+        const qreal xr = perspXAt(uTextR, v);
+        if (refTextWidth < 1.0 || xr <= xl) return 1.0;
+        // 限幅：锚点标歪时不至于把字拉成离谱宽度
+        return qBound(0.35, (xr - xl) / refTextWidth, 2.8);
+    };
+
     // 第 i 行文字的基线：坐在第 guideIdx 条与第 (guideIdx + stepPerRow) 条之间，
     // 位置由 baselineRatio 决定（0 = 贴上线，1 = 贴下线）
     auto guideBaseline = [&](int guideIdx, qreal xAt) -> qreal {
@@ -855,6 +905,8 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
     std::vector<qreal> currentPageYPositions;
     std::vector<int> currentPageParaIndex;
     std::vector<int> currentPageGuideIdx;   // 每行使用的导引曲线下标（-1 = 不跟随）
+    std::vector<qreal> currentPageScaleX;   // 每行的水平缩放（透视补偿）
+    std::vector<qreal> currentPageOriginX;  // 每行文字块的左边界（画布坐标）
 
     qreal y = scaledTopMargin + fm.ascent();
     int paraIndex = 0;
@@ -892,6 +944,8 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         pageData.lineParagraphIndex = std::move(currentPageParaIndex);
         pageData.guideCurves = guideCurves;
         pageData.lineGuideIdx = std::move(currentPageGuideIdx);
+        pageData.lineScaleX = std::move(currentPageScaleX);
+        pageData.lineOriginX = std::move(currentPageOriginX);
         pageDataList.push_back(std::move(pageData));
         
         currentPage.clear();
@@ -899,6 +953,8 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         currentPageYPositions.clear();
         currentPageParaIndex.clear();
         currentPageGuideIdx.clear();
+        currentPageScaleX.clear();
+        currentPageOriginX.clear();
         // 翻页后重新从第一条横线开始（作业本每页排版相同）
         guideIdx = 0;
     };
@@ -914,7 +970,6 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
 
         if (useGuides) {
             // 导引模式：行位置完全由横线决定，与 lineSpacing 无关
-            const qreal contentLeftPx = m_params.leftMargin * m_params.rate;
             if (guideIdx + stepPerRow > guideCount) {
                 flushPage();            // 本页横线用尽
             }
@@ -965,6 +1020,8 @@ std::vector<PageRenderData> HandwriteGenerator::layoutPages(const std::string& t
         currentPageYPositions.push_back(y);
         currentPageParaIndex.push_back(paraIndex);
         currentPageGuideIdx.push_back(useGuides ? guideIdx : -1);
+        currentPageScaleX.push_back(useGuides ? horizontalScaleAt(y) : 1.0);
+        currentPageOriginX.push_back(useGuides ? horizontalOriginAt(y) : contentLeftPx);
         if (useGuides) guideIdx += stepPerRow;
 
         RenderLine renderLine;
@@ -1265,6 +1322,22 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
             continue;
         }
         
+        // 水平透视补偿：斜拍时纸是梯形。该行的文字块既要**平移到纸上的实际位置**
+        // （左边界随透视左右移动），又要**按实际宽度缩放**（字宽与字距一起变）。
+        // 变换：x -> originX + (x - contentLeft) * lineScale
+        // 于是逻辑坐标 contentLeft 正好落在 originX 上。
+        const qreal lineScale = (guidesValid && lineIdx < data.lineScaleX.size())
+                              ? data.lineScaleX[lineIdx] : 1.0;
+        const qreal lineOrigin = (guidesValid && lineIdx < data.lineOriginX.size())
+                              ? data.lineOriginX[lineIdx] : contentLeft;
+        const bool needScale = std::abs(lineScale - 1.0) > 1e-4
+                            || std::abs(lineOrigin - contentLeft) > 0.5;
+        if (needScale) {
+            painter.save();
+            painter.translate(lineOrigin - lineScale * contentLeft, 0.0);
+            painter.scale(lineScale, 1.0);
+        }
+
         qreal x = contentLeft;
         painter.setFont(font);
         
@@ -1309,6 +1382,8 @@ QImage HandwriteGenerator::renderPageStatic(const PageRenderData& data) {
                                        data.params, localRng, 0, lineCharIndexMap,
                                        warp, warpPhaseBase, warpAmplitude, warpWavelength,
                                        guideCurve, data.params.lineGuides.followCurve);
+
+        if (needScale) painter.restore();
     }
     
     painter.end();

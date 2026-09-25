@@ -160,6 +160,8 @@ struct BackgroundCalibration {
     int cols = 3;                    // 网格列数
     std::vector<QPointF> gridPoints; // rows*cols 个点，行主序，图片坐标空间
     
+    // ⚠️ 注意：这个判断**包含 enabled**。构造时请先把 enabled 置真再调用校验，
+    // 否则会得到「刚填好网格却判定无效」的结果（CLI 加载预设时踩过）。
     bool isValid() const {
         return enabled && rows >= 2 && cols >= 2 
             && static_cast<int>(gridPoints.size()) == rows * cols;
@@ -277,6 +279,12 @@ struct PageRenderData {
     // lineGuideIdx[i] = 第 i 行使用的曲线下标，-1 = 该行不跟随曲线
     std::vector<GuideCurve> guideCurves;
     std::vector<int> lineGuideIdx;
+    // 每行的水平缩放（斜拍补偿）：斜向拍摄时纸是梯形，同样多的字在窄的一侧
+    // 应占更窄的宽度。由锚点四角双线性插值得到；无锚点或正拍时为 1.0
+    std::vector<qreal> lineScaleX;
+    // 每行文字块左边界在画布上的实际 x（同样由锚点插值而来）。
+    // 缩放要围绕它进行 —— 否则行首仍固定在页面标称位置，会画到纸外面去
+    std::vector<qreal> lineOriginX;
 
     // 已按页面尺寸解码并缩放好的背景图（所有页共享同一份，QImage 隐式共享零拷贝）
     QImage backgroundImage;
