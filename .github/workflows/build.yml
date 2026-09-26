@@ -18,10 +18,13 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      # fetch-depth: 0 —— 生成 Release 说明需要读到上一个 tag 与完整提交历史
+      # fetch-depth: 0 + fetch-tags: true —— 生成 Release 说明要读上一个 tag 与完整提交历史。
+      # fetch-tags 必须显式打开：只给 fetch-depth: 0 时历史 tag 不一定被取回，
+      # 表现为 release_notes 里 "Previous tag: (none)"、提交列表为空（v2.9.0 踩过）。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup Python
         id: py

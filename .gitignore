@@ -15,6 +15,7 @@ Makefile
 .ninja_log
 *.autogen/
 outputs/
+release_notes.md
 test_*/
 quicktest/
 *.log
