@@ -432,6 +432,46 @@ static void testLineGuides() {
         g.useInterpolation = false;
         check(g.isValid(), "不插值模式 1 条即可");
     }
+    // --- build() 顺序无关：关键曲线顺序被打乱也不应改变结果 ---
+    {
+        GuideCurve top, bot;
+        top.pts = std::vector<QPointF>{QPointF(0, 100), QPointF(100, 100)};
+        bot.pts = std::vector<QPointF>{QPointF(0, 500), QPointF(100, 500)};
+
+        LineGuideSet a;
+        a.enabled = true; a.lineCount = 5;
+        a.keyCurves = {top, bot};
+
+        LineGuideSet b;
+        b.enabled = true; b.lineCount = 5;
+        b.keyCurves = {bot, top};            // 反序（预设文件里顺序不可控）
+
+        const auto ra = a.build();
+        const auto rb = b.build();
+        checkEq(ra.size(), rb.size(), "顺序无关：条数一致");
+        if (ra.size() >= 2 && ra.size() == rb.size()) {
+            check(std::abs(ra.front().yAt(50.0) - rb.front().yAt(50.0)) < 1e-6,
+                  "顺序无关：首条一致");
+            check(std::abs(ra.back().yAt(50.0) - rb.back().yAt(50.0)) < 1e-6,
+                  "顺序无关：末条一致");
+            check(ra.front().yAt(50.0) < ra.back().yAt(50.0), "首条在上、末条在下");
+        }
+    }
+    // --- 单条曲线内部点乱序也应被排序（sample 的前置条件是 x 升序） ---
+    {
+        GuideCurve c;
+        c.pts = std::vector<QPointF>{QPointF(100, 200), QPointF(0, 100), QPointF(50, 150)};
+        LineGuideSet g;
+        g.enabled = true; g.lineCount = 2; g.useInterpolation = false;
+        g.keyCurves = {c};
+        const auto r = g.build();
+        checkEq(r.size(), size_t(1), "单条不插值输出 1 条");
+        if (!r.empty()) {
+            check(std::abs(r[0].yAt(0.0) - 100.0) < 1e-6, "乱序点排序后：x=0 处正确");
+            check(std::abs(r[0].yAt(50.0) - 150.0) < 1e-6, "乱序点排序后：x=50 处正确");
+            check(std::abs(r[0].yAt(100.0) - 200.0) < 1e-6, "乱序点排序后：x=100 处正确");
+        }
+    }
     // --- 曲线编解码往返（配置用） ---
     {
         GuideCurve c1, c2;
@@ -537,6 +577,29 @@ static void testLineDetection() {
     {
         const auto res = HandwriteGenerator::detectHorizontalLines(QImage(16, 16, QImage::Format_RGB32));
         check(!res.ok, "过小图片检测失败");
+    }
+    // --- 深色背景（桌面）+ 纸只占中间：不应被背景带偏，也不应产生纸外垃圾段 ---
+    {
+        QImage img(300, 300, QImage::Format_RGB32);
+        img.fill(qRgb(38, 38, 42));                                   // 深灰桌面（比横线更暗）
+        for (int y = 20; y < 280; ++y) {
+            for (int x = 60; x < 240; ++x) img.setPixel(x, y, qRgb(250, 250, 246));
+        }
+        for (int i = 0; i < 8; ++i) {
+            const int ly = 28 + i * 32;
+            for (int x = 60; x < 240; ++x) img.setPixel(x, ly, qRgb(150, 165, 195));
+        }
+        const auto res = HandwriteGenerator::detectHorizontalLines(img);
+        check(res.ok, "深色背景下仍能检测到横线", res.message.toStdString());
+        if (res.ok && !res.curves.empty()) {
+            const GuideCurve& c = res.curves.front();
+            const qreal x0 = c.pts.front().x();
+            const qreal x1 = c.pts.back().x();
+            // 纸面是 x∈[60,240)；曲线两端不应延伸到纸外（否则会带着等距初值的垃圾段）
+            check(x0 >= 55.0, "曲线左端落在纸面内", "x0=" + std::to_string(x0));
+            check(x1 <= 245.0, "曲线右端落在纸面内", "x1=" + std::to_string(x1));
+            check(x1 - x0 > 120.0, "曲线有效跨度足够宽", "span=" + std::to_string(x1 - x0));
+        }
     }
     // --- 检测出的关键曲线应能直接用于插值渲染 ---
     {

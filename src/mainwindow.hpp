@@ -166,7 +166,7 @@ protected:
 private:
     enum class Drag { None, Curve, Endpoint };
 
-    void refresh();                 // 由关键曲线 + 条数重算预览曲线
+    void refresh(bool structural = true);   // structural=false：拖拽中，跳过排序与按钮状态刷新
     void sortKeyCurves();           // 按垂直位置排序，插值才正确
     void pushUndo();
     void updateUI();

@@ -722,33 +722,60 @@ std::vector<double> flattenGuideCurves(const std::vector<GuideCurve>& curves) {
     return out;
 }
 
+namespace {
+
+// 曲线整体的纵向位置（用点集 y 均值）。排序关键曲线时用它做键。
+qreal guideMeanY(const GuideCurve& c) {
+    if (c.pts.empty()) return 0.0;
+    qreal s = 0.0;
+    for (const QPointF& p : c.pts) s += p.y();
+    return s / static_cast<qreal>(c.pts.size());
+}
+
+// 把关键曲线整理成「可插值」的形式：
+//   · 丢掉不可用的（少于 2 点）
+//   · 每条按 x 升序 + 去重（sample() 的前置条件，不平滑，保持原始形状）
+//   · 整组按垂直位置排序 —— 插值必须发生在空间相邻的两条之间。
+// 这一步不能只靠 UI 做：CLI 从预设文件读进来的顺序完全取决于文件内容，
+// 顺序一乱就会在两段相距很远的曲线之间插值，位置全错。
+std::vector<GuideCurve> prepareKeyCurves(const std::vector<GuideCurve>& in) {
+    std::vector<GuideCurve> out;
+    out.reserve(in.size());
+    for (const GuideCurve& c : in) {
+        if (!c.usable()) continue;
+        GuideCurve n = c;
+        n.normalize(0);
+        if (!n.usable()) continue;
+        out.push_back(std::move(n));
+    }
+    std::stable_sort(out.begin(), out.end(), [](const GuideCurve& a, const GuideCurve& b) {
+        return guideMeanY(a) < guideMeanY(b);
+    });
+    return out;
+}
+
+} // namespace
+
 std::vector<GuideCurve> LineGuideSet::build() const {
     std::vector<GuideCurve> out;
     if (keyCurves.empty()) return out;
 
-    // 不插值：手绘几条就用几条
-    if (!useInterpolation || keyCurves.size() < 2 || lineCount < 2) {
-        for (const GuideCurve& c : keyCurves) {
-            if (c.usable()) out.push_back(c);
-        }
-        return out;
+    const std::vector<GuideCurve> keys = prepareKeyCurves(keyCurves);
+
+    // 不插值：手绘/检测出几条就用几条
+    if (!useInterpolation || keys.size() < 2 || lineCount < 2) {
+        return keys;
     }
 
     // 插值前先把各条关键曲线重采样到相同点数，逐点线性混合才有意义
     const int N = 64;
-    std::vector<std::vector<QPointF>> keys;
-    keys.reserve(keyCurves.size());
-    for (const GuideCurve& c : keyCurves) {
-        if (c.usable()) keys.push_back(c.resampleByArcLength(N));
-    }
-    if (keys.size() < 2) {
-        for (const GuideCurve& c : keyCurves) {
-            if (c.usable()) out.push_back(c);
-        }
-        return out;
+    std::vector<std::vector<QPointF>> resampled;
+    resampled.reserve(keys.size());
+    for (const GuideCurve& c : keys) {
+        resampled.push_back(c.resampleByArcLength(N));
     }
 
-    const int K = static_cast<int>(keys.size());
+    const int K = static_cast<int>(resampled.size());
     out.reserve(static_cast<size_t>(lineCount));
     for (int i = 0; i < lineCount; ++i) {
         // 把 i 映射到关键曲线区间 [k, k+1] 上的局部比例 t
@@ -761,8 +788,8 @@ std::vector<GuideCurve> LineGuideSet::build() const {
         GuideCurve c;
         c.pts.reserve(static_cast<size_t>(N));
         for (int j = 0; j < N; ++j) {
-            c.pts.push_back(keys[static_cast<size_t>(k)][static_cast<size_t>(j)] * (1.0 - t)
-                          + keys[static_cast<size_t>(k) + 1][static_cast<size_t>(j)] * t);
+            c.pts.push_back(resampled[static_cast<size_t>(k)][static_cast<size_t>(j)] * (1.0 - t)
+                          + resampled[static_cast<size_t>(k) + 1][static_cast<size_t>(j)] * t);
         }
         out.push_back(std::move(c));
     }
@@ -943,9 +970,11 @@ LineDetectionResult HandwriteGenerator::detectHorizontalLines(const QImage& imag
     const int search  = std::max(3, static_cast<int>(d / 3.0));
 
     res.curves.reserve(static_cast<size_t>(n));
+    int dropped = 0;
     for (int i = 0; i < n; ++i) {
         int curY = static_cast<int>(first + i * d + 0.5);
-        GuideCurve c;
+        std::vector<QPointF> raw;
+        std::vector<char> valid;
         for (int x = 0; x < W; x += colStep) {
             const int x1 = std::min(W, x + colStep);
             const int ya = std::max(0, curY - search);
@@ -959,12 +988,54 @@ LineDetectionResult HandwriteGenerator::detectHorizontalLines(const QImage& imag
             // 窗口内没有任何横线像素（bestV 仍为 0）时**保持 curY 不变**：
             // 该列块可能落在纸外/被遮挡，此时取窗口边界会把曲线拽到
             // 相邻的横线上，之后整条线就整体偏移一个线距（真实踩过）。
-            if (bestV > 0.0) curY = bestY;
-            c.pts.push_back(QPointF(x + (x1 - x) / 2.0, curY));
+            const bool hit = (bestV > 0.0);
+            if (hit) curY = bestY;
+            raw.push_back(QPointF(x + (x1 - x) / 2.0, curY));
+            valid.push_back(hit ? 1 : 0);
         }
-        if (c.pts.size() < 2) continue;
+        if (raw.size() < 3) { ++dropped; continue; }
+
+        // 裁掉首尾「没找到横线」的列块。那里是纸外或空白，留下来的话
+        // 曲线两端会带着等距初值（实测末条横线纸外那段偏了 10px）。
+        int lo = 0, hi = static_cast<int>(raw.size()) - 1;
+        while (lo <= hi && !valid[static_cast<size_t>(lo)]) ++lo;
+        while (hi >= lo && !valid[static_cast<size_t>(hi)]) --hi;
+        const int span = hi - lo + 1;
+        if (span < 3) { ++dropped; continue; }
+
+        int hits = 0;
+        for (int k = lo; k <= hi; ++k) {
+            if (valid[static_cast<size_t>(k)]) ++hits;
+        }
+        // 有效点不足三分之一（大片遮挡/阴影）说明这条线不可信，整条丢弃
+        if (hits * 3 < span) { ++dropped; continue; }
+
+        GuideCurve c;
+        c.pts.reserve(static_cast<size_t>(span));
+        for (int k = lo; k <= hi; ++k) {
+            qreal yv = raw[static_cast<size_t>(k)].y();
+            if (!valid[static_cast<size_t>(k)]) {
+                // 中间被遮挡的列块：用前后最近的有效点线性插值补回来，
+                // 这样"断裂"不会在渲染时变成一条平的直线段
+                int a = k - 1;
+                while (a >= lo && !valid[static_cast<size_t>(a)]) --a;
+                int b = k + 1;
+                while (b <= hi && !valid[static_cast<size_t>(b)]) ++b;
+                if (a >= lo && b <= hi) {
+                    const qreal t = static_cast<qreal>(k - a) / (b - a);
+                    yv = raw[static_cast<size_t>(a)].y() * (1.0 - t)
+                       + raw[static_cast<size_t>(b)].y() * t;
+                } else if (a >= lo) {
+                    yv = raw[static_cast<size_t>(a)].y();
+                } else if (b <= hi) {
+                    yv = raw[static_cast<size_t>(b)].y();
+                }
+            }
+            c.pts.push_back(QPointF(raw[static_cast<size_t>(k)].x(), yv));
+        }
         c.normalize(1);
-        res.curves.push_back(std::move(c));
+        if (c.usable()) res.curves.push_back(std::move(c));
+        else ++dropped;
     }
 
     if (res.curves.size() < 2) {
@@ -986,11 +1057,17 @@ LineDetectionResult HandwriteGenerator::detectHorizontalLines(const QImage& imag
         const GuideCurve& a = res.curves.front();
         const GuideCurve& b = res.curves.back();
         const GuideCurve& mid = res.curves[static_cast<size_t>(midIdx)];
+        // 只在三条曲线共有的 x 区间上比较 —— 裁掉纸外垃圾段之后，
+        // 各条曲线的 x 范围可能不同，超出部分 yAt() 会夹取端点，比出来不准
+        const qreal xLo = std::max(a.pts.front().x(), std::max(mid.pts.front().x(), b.pts.front().x()));
+        const qreal xHi = std::min(a.pts.back().x(),  std::min(mid.pts.back().x(),  b.pts.back().x()));
         double diffSum = 0.0;
         int cnt = 0;
-        for (const QPointF& p : mid.pts) {
-            const qreal interp = a.yAt(p.x()) * (1.0 - t) + b.yAt(p.x()) * t;
-            diffSum += std::abs(interp - p.y());
+        const int probes = 32;
+        for (int k = 0; k < probes && xHi > xLo; ++k) {
+            const qreal x = xLo + (xHi - xLo) * k / (probes - 1.0);
+            const qreal interp = a.yAt(x) * (1.0 - t) + b.yAt(x) * t;
+            diffSum += std::abs(interp - mid.yAt(x));
             ++cnt;
         }
         const double avgDiff = (cnt > 0) ? diffSum / cnt : 0.0;
@@ -1005,6 +1082,9 @@ LineDetectionResult HandwriteGenerator::detectHorizontalLines(const QImage& imag
     res.spacing = d;
     res.message = QObject::tr("检测到 %1 条横线（间距约 %2 px，关键曲线 %3 条）")
                   .arg(res.suggestedCount).arg(d, 0, 'f', 1).arg(res.keyCurves.size());
+    if (dropped > 0) {
+        res.message += QObject::tr("，另有 %1 条因遮挡/出界被丢弃").arg(dropped);
+    }
     return res;
 }
 

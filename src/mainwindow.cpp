@@ -1885,7 +1885,14 @@ LineGuideDialog::LineGuideDialog(const QString& imagePath, const LineGuideSet& g
     // ── 连接 ──
     connect(m_btnDetect, &QPushButton::clicked, this, [this]() {
         pushUndo();
+        // 大图检测要扫全图像素，先挂上等待光标，否则界面像卡死
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        m_btnDetect->setEnabled(false);
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         const auto res = HandwriteGenerator::detectHorizontalLines(m_image);
+        m_btnDetect->setEnabled(true);
+        QApplication::restoreOverrideCursor();
+
         if (!res.ok) {
             m_lblStatus->setText(res.message);
             m_keyCurves = m_undo.back();   // 检测失败不改变现状
@@ -1941,7 +1948,22 @@ LineGuideDialog::LineGuideDialog(const QString& imagePath, const LineGuideSet& g
     connect(m_sliderRatio, &QSlider::valueChanged, this, [this](int v) {
         m_lblRatio->setText(QString::number(v / 100.0, 'f', 2));
     });
-    connect(btnOk, &QPushButton::clicked, this, &QDialog::accept);
+    connect(btnOk, &QPushButton::clicked, this, [this]() {
+        // 只画了 1 条就点确定的话，插值模式判定为无效、导引会**静默不生效** ——
+        // 用户只会觉得"画了线却没用"。这里拦下来讲清楚。
+        if (!m_keyCurves.empty() && !getGuides().isValid()) {
+            QMessageBox::information(
+                this, tr("横线导引还不可用"),
+                m_interpolate
+                    ? tr("插值模式至少需要 2 条关键曲线，当前只有 %1 条。\n\n"
+                         "· 再画一条（首尾各一条即可），或\n"
+                         "· 取消勾选「关键曲线间自动插值」，直接使用已画的曲线")
+                      .arg(m_keyCurves.size())
+                    : tr("请至少画一条关键曲线。"));
+            return;
+        }
+        accept();
+    });
     connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);
 
     refresh();
@@ -1962,8 +1984,14 @@ void LineGuideDialog::sortKeyCurves() {
                      });
 }
 
-void LineGuideDialog::refresh() {
-    sortKeyCurves();
+void LineGuideDialog::refresh(bool structural) {
+    // 拖拽过程中必须跳过排序：sortKeyCurves() 会改变曲线在数组里的下标，
+    // 而 m_selCurve / m_dragSnapshot 都是按下标索引的 —— 一边拖一边重排，
+    // 拖的就不再是原来那条曲线了（一开始就是这么错的）。
+    if (structural) {
+        sortKeyCurves();
+        updateUI();
+    }
 
     LineGuideSet tmp;
     tmp.enabled = true;
@@ -1972,7 +2000,6 @@ void LineGuideDialog::refresh() {
     tmp.lineCount = qMax(2, m_lineCount);
     m_preview = tmp.isValid() ? tmp.build() : std::vector<GuideCurve>();
 
-    updateUI();
     update();
 }
 
@@ -2112,7 +2139,7 @@ void LineGuideDialog::mouseMoveEvent(QMouseEvent* ev) {
             pts[i] = m_dragSnapshot[i] + delta;
         }
     }
-    refresh();
+    refresh(false);   // 拖拽中不重排序，否则下标错位会拖到别的曲线上
 }
 
 void LineGuideDialog::mouseReleaseEvent(QMouseEvent*) {
@@ -2148,6 +2175,11 @@ void LineGuideDialog::mouseReleaseEvent(QMouseEvent*) {
 }
 
 void LineGuideDialog::keyPressEvent(QKeyEvent* ev) {
+    // Ctrl+Z 撤销（与「撤销」按钮同效，走平台标准快捷键）
+    if (ev->matches(QKeySequence::Undo)) {
+        if (m_btnUndo->isEnabled()) m_btnUndo->click();
+        return;
+    }
     if ((ev->key() == Qt::Key_Delete || ev->key() == Qt::Key_Backspace) && m_selCurve >= 0) {
         pushUndo();
         m_keyCurves.erase(m_keyCurves.begin() + m_selCurve);

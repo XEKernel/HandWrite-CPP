@@ -66,6 +66,10 @@
   AUTOUIC 记得把 `ui/mainwindow.ui` 加进 target。
 - ⭐ **LineGuideDialog 正确性关键**：关键曲线必须**按垂直位置排序**再插值 ——
   插值在空间相邻的两条之间做，用户描线先后顺序不能决定分段。
+- ⭐ **排序/归一化必须在引擎层做**，不能只靠 UI：`LineGuideSet::build()` 要自己保证
+  关键曲线有序、每条曲线点按 x 升序 —— CLI 从预设文件读进来的顺序完全不可控。
+- ⭐ **拖拽期间不要重排序**：`m_selCurve` 与拖拽快照都是**数组下标**索引，
+  一边拖一边重排会操作到别的对象（用 `refresh(structural=false)` 区分结构性刷新）。
 - ⭐ **robocopy 陷阱**：Git Bash 里必须 `MSYS_NO_PATHCONV=1 robocopy ...`，
   否则 `/MIR` `/XD` 被 MSYS 路径转换破坏，robocopy 静默失败 → 构建的是旧代码还以为同步成功。
   同步后必须 grep 目标文件确认含新符号。
